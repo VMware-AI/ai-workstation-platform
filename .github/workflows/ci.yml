@@ -285,7 +285,7 @@ jobs:
         working-directory: packages/agent-platform-web-ui
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -331,7 +331,7 @@ jobs:
         if: steps.check_lock.outputs.exists == 'true'
         with:
           version: 9
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         if: steps.check_lock.outputs.exists == 'true'
         with:
           node-version: 20
