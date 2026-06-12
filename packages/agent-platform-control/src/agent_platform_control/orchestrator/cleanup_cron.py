@@ -18,8 +18,6 @@ before customer ops has signed off on the recovery runbook.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -28,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..db.models import VM, DeploymentItem
 from .audit import record_audit, sanitize
+from .periodic_task import PeriodicTask
 from .protocol import Provisioner
 
 logger = logging.getLogger(__name__)
@@ -117,12 +116,11 @@ async def cleanup_failed_vms(
         )
 
 
-class FailedVmCleanupCron:
+class FailedVmCleanupCron(PeriodicTask):
     """Background coroutine that sweeps every ``poll_interval_s`` seconds.
 
-    Mirrors the DeploymentWorker pattern (start/stop, stop_event). Single
-    instance per deployment; in M2 we may serialise with a DB advisory lock
-    if multiple control-plane replicas need to run cleanup concurrently.
+    Single instance per deployment; in M2 we may serialise with a DB advisory
+    lock if multiple control-plane replicas need to run cleanup concurrently.
     """
 
     def __init__(
@@ -137,24 +135,8 @@ class FailedVmCleanupCron:
         self._provisioner = provisioner
         self._retain_hours = retain_hours
         self._poll_interval_s = poll_interval_s
-        self._task: asyncio.Task[None] | None = None
-        self._stop_event = asyncio.Event()
-
-    def start(self) -> None:
-        if self._task is not None:
-            return
-        self._stop_event.clear()
-        self._task = asyncio.create_task(self._run(), name="failed-vm-cleanup-cron")
-
-    async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._stop_event.set()
-        try:
-            await asyncio.wait_for(self._task, timeout=5.0)
-        except TimeoutError:
-            self._task.cancel()
-        self._task = None
+        self._task_name = "failed-vm-cleanup-cron"
+        self._init_periodic()
 
     async def sweep_once(self) -> int:
         """Public for tests — runs one cleanup pass and returns the count."""
@@ -162,16 +144,10 @@ class FailedVmCleanupCron:
             self._sm, self._provisioner, retain_hours=self._retain_hours
         )
 
-    async def _run(self) -> None:
-        logger.info("failed-vm-cleanup-cron started")
-        while not self._stop_event.is_set():
-            try:
-                await self.sweep_once()
-            except Exception:
-                logger.exception("cleanup cron sweep crashed")
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stop_event.wait(), self._poll_interval_s)
-        logger.info("failed-vm-cleanup-cron stopped")
+    async def _tick(self) -> bool:
+        # Periodic cron: sweep, then always wait one poll interval.
+        await self.sweep_once()
+        return False
 
 
 # ============================================================ heartbeat sweeper
@@ -233,7 +209,7 @@ async def heartbeat_sweep(
         )
 
 
-class HeartbeatSweeper:
+class HeartbeatSweeper(PeriodicTask):
     """Background coroutine that classifies VM liveness every ``poll_interval_s``."""
 
     def __init__(
@@ -248,24 +224,8 @@ class HeartbeatSweeper:
         self._unhealthy_after_s = unhealthy_after_s
         self._lost_after_s = lost_after_s
         self._poll_interval_s = poll_interval_s
-        self._task: asyncio.Task[None] | None = None
-        self._stop_event = asyncio.Event()
-
-    def start(self) -> None:
-        if self._task is not None:
-            return
-        self._stop_event.clear()
-        self._task = asyncio.create_task(self._run(), name="heartbeat-sweeper")
-
-    async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._stop_event.set()
-        try:
-            await asyncio.wait_for(self._task, timeout=5.0)
-        except TimeoutError:
-            self._task.cancel()
-        self._task = None
+        self._task_name = "heartbeat-sweeper"
+        self._init_periodic()
 
     async def sweep_once(self) -> tuple[int, int]:
         return await heartbeat_sweep(
@@ -274,13 +234,7 @@ class HeartbeatSweeper:
             lost_after_s=self._lost_after_s,
         )
 
-    async def _run(self) -> None:
-        logger.info("heartbeat-sweeper started")
-        while not self._stop_event.is_set():
-            try:
-                await self.sweep_once()
-            except Exception:
-                logger.exception("heartbeat sweep crashed")
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stop_event.wait(), self._poll_interval_s)
-        logger.info("heartbeat-sweeper stopped")
+    async def _tick(self) -> bool:
+        # Periodic sweeper: classify, then always wait one poll interval.
+        await self.sweep_once()
+        return False
