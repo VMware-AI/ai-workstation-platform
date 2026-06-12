@@ -11,7 +11,7 @@ ARG GOOSE_SHA256_AMD64=d575073c059f22e0b697f1a0b502ecf629cfd4604a67e7659a8542a4e
 ARG GOOSE_SHA256_ARM64=a404b1c8b404b568631d85b7ac9dcfdfa7314113269d6a3b60f0869966580974
 
 # ---- Stage 1: fetch + verify ----
-FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS fetch
+FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716 AS fetch
 ARG GOOSE_VERSION
 ARG TARGETARCH
 ARG GOOSE_SHA256_AMD64
@@ -36,7 +36,7 @@ RUN case "${TARGETARCH}" in \
     && ./goose --version
 
 # ---- Stage 2: runtime ----
-FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS runtime
+FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716 AS runtime
 ARG GOOSE_VERSION
 
 LABEL org.opencontainers.image.title="goose" \
