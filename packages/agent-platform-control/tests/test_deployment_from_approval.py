@@ -85,6 +85,23 @@ async def test_from_approval_creates_single_user_deployment(client, approval_db)
 
 
 @pytest.mark.asyncio
+async def test_from_approval_template_comes_from_package_specs_yaml(client, approval_db):
+    """Regression (#352): the package → template mapping must come from
+    config/vm_package_specs.yaml (get_specs, the single source of truth,
+    decision 11) — not a second hardcoded dict in api/deployments.py. The
+    template string must equal the yaml's verbatim, not a parallel copy."""
+    from agent_platform_control.package_specs import get_specs
+
+    spec = get_specs().get("agent-vm-medium")
+    assert spec is not None, "agent-vm-medium must be defined in vm_package_specs.yaml"
+
+    req_id = await _insert_request(approval_db, package="agent-vm-medium")
+    r = await client.post(f"/v1/deployments/from-approval/{req_id}", headers=ADMIN)
+    assert r.status_code == 201, r.text
+    assert r.json()["template"] == spec.template
+
+
+@pytest.mark.asyncio
 async def test_approval_request_id_unique_constraint_blocks_double_insert(approval_db):
     """The UNIQUE index is the real TOCTOU guard (PR-review #129): a second
     deployment row for the same approval_request_id must fail at the DB."""

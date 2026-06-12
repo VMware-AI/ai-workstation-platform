@@ -52,9 +52,9 @@ class PackageSpecs:
         return sorted(self.packages.keys())
 
 
-# Default location is alongside the agent-platform-control package; tests + alternate
-# deployments override via the AGENT_PLATFORM_VM_PACKAGE_SPECS env var (resolved by
-# Settings in config.py).
+# Default location is alongside the agent-platform-control package. Tests load an
+# explicit fixture via ``load_specs(Path(...))``; an env-var / DB override is the
+# M2 forward path (decision 11 → C), not yet wired.
 _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "vm_package_specs.yaml"
 
 
@@ -111,10 +111,10 @@ def load_specs(path: Path | None = None) -> PackageSpecs:
 
 @lru_cache(maxsize=1)
 def get_specs() -> PackageSpecs:
-    """Cached default-path accessor.
+    """Cached default-path accessor — the single source of truth for package →
+    template/agent specs, consumed by ``api/deployments.create_from_approval``.
 
-    Tests call ``get_specs.cache_clear()`` after pointing at a fixture file via
-    the ``AGENT_PLATFORM_VM_PACKAGE_SPECS`` env var (handled in Settings.config.py once
-    that wiring lands; for now tests call ``load_specs(Path(...))`` directly).
+    Tests that need a fixture call ``load_specs(Path(...))`` directly (and
+    ``get_specs.cache_clear()`` if they exercise this cached accessor).
     """
     return load_specs()

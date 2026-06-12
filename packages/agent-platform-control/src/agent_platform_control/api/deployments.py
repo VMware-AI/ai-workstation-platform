@@ -38,6 +38,7 @@ from ..orchestrator.deployment_state import recompute_deployment_state
 from ..orchestrator.protocol import Provisioner
 from ..orchestrator.quota import QuotaExceededError, check_batch_quota
 from ..orchestrator.tokens import encrypt_user_token, generate_user_token, hash_user_token
+from ..package_specs import get_specs
 from ..signing import SignatureVerificationError, verify_signature
 
 logger = logging.getLogger(__name__)
@@ -48,18 +49,6 @@ logger = logging.getLogger(__name__)
 TENANT_SCOPE_ADMIN_BYPASS = True
 
 router = APIRouter(prefix="/v1/deployments", tags=["deployments"])
-
-# Maps the free-text C13 approval ``package`` to a vCenter template inventory
-# path. The approval form (agent-platform-portal RequestAgent) offers exactly these
-# four packages, so an unknown value means the form and this map drifted apart.
-# TODO(1.4): replace placeholder paths with the real published template names
-# once C3 image build settles its naming convention.
-_PACKAGE_TEMPLATE: dict[str, str] = {
-    "agent-vm-small": "[templates] agent-platform-agent-small/agent-platform-agent-small.vmtx",
-    "agent-vm-medium": "[templates] agent-platform-agent-medium/agent-platform-agent-medium.vmtx",
-    "agent-vm-large": "[templates] agent-platform-agent-large/agent-platform-agent-large.vmtx",
-    "agent-vm-gpu": "[templates] agent-platform-agent-gpu/agent-platform-agent-gpu.vmtx",
-}
 
 
 def _utcnow() -> datetime:
@@ -356,13 +345,18 @@ async def create_from_approval(
             ),
         )
 
-    template = _PACKAGE_TEMPLATE.get(approval.package)
-    if template is None:
-        known = ", ".join(sorted(_PACKAGE_TEMPLATE))
+    # Package → vCenter template path comes from config/vm_package_specs.yaml
+    # (decision 11), the single source of truth. The C13 approval form offers
+    # exactly these packages, so an unknown value means the form and the specs
+    # drifted apart.
+    spec = get_specs().get(approval.package)
+    if spec is None:
+        known = ", ".join(get_specs().known_packages())
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Unknown package '{approval.package}'. Known packages: {known}.",
         )
+    template = spec.template
 
     if force:
         # 销毁用户 VM 不允许单次未确认 POST（#216，与 upgrades cutover/rollback
