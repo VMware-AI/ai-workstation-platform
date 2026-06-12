@@ -25,7 +25,6 @@ The worker does NOT auto-cutover from ``blue_ready`` or auto-cleanup from
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from datetime import UTC, datetime
 
@@ -34,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..db.models import Upgrade
 from . import upgrade_state as us
+from .periodic_task import PeriodicTask
 
 logger = logging.getLogger("agent_platform_control.orchestrator.upgrade")
 
@@ -54,7 +54,7 @@ _DRIVABLE_STATES: frozenset[str] = frozenset(
 )
 
 
-class UpgradeWorker:
+class UpgradeWorker(PeriodicTask):
     """Drains in-flight Upgrade rows. Start with ``.start()``, stop with ``.stop()``."""
 
     def __init__(
@@ -68,26 +68,13 @@ class UpgradeWorker:
         self._poll_interval_s = poll_interval_s
         # Pulled out so tests can drop it to 0 — represents vCenter stub latency.
         self._step_delay_s = step_delay_s
-        self._task: asyncio.Task[None] | None = None
-        self._stop_event = asyncio.Event()
+        self._task_name = "upgrade-worker"
+        self._init_periodic()
 
     # ---- lifecycle ----
 
-    def start(self) -> None:
-        if self._task is not None:
-            return
-        self._stop_event.clear()
-        self._task = asyncio.create_task(self._run(), name="upgrade-worker")
-
-    async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._stop_event.set()
-        try:
-            await asyncio.wait_for(self._task, timeout=5.0)
-        except TimeoutError:
-            self._task.cancel()
-        self._task = None
+    async def _tick(self) -> bool:
+        return await self.drain_once() > 0
 
     async def drain_once(self) -> int:
         """Advance one upgrade by one state, if any is drivable. Public for tests."""
@@ -96,21 +83,6 @@ class UpgradeWorker:
             return 0
         await self._process(upgrade_id)
         return 1
-
-    # ---- internals ----
-
-    async def _run(self) -> None:
-        logger.info("upgrade-worker started")
-        while not self._stop_event.is_set():
-            try:
-                processed = await self.drain_once()
-            except Exception:
-                logger.exception("upgrade-worker loop error")
-                processed = 0
-            if processed == 0:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._stop_event.wait(), self._poll_interval_s)
-        logger.info("upgrade-worker stopped")
 
     async def _claim_one(self) -> str | None:
         """Pick one Upgrade in a drivable state. We don't lock the row — for the

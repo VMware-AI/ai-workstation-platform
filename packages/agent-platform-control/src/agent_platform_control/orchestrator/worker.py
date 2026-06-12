@@ -21,8 +21,6 @@ The worker is started by app lifespan when AGENT_PLATFORM_ENABLE_WORKER=1.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -34,6 +32,7 @@ from ..db.models import VM, Deployment, DeploymentItem, User
 from .agent_user import AgentUserError, derive_uid, sanitize_username
 from .audit import record_audit
 from .deployment_state import recompute_deployment_state
+from .periodic_task import PeriodicTask
 from .protocol import CloneResult, CloneSpec, Provisioner
 from .secret_provisioner import hash_heartbeat_token, provision_per_vm_secrets
 from .tokens import decrypt_user_token
@@ -135,7 +134,7 @@ def _elapsed_seconds(now: datetime, since: datetime) -> float:
     return (now - since).total_seconds()
 
 
-class DeploymentWorker:
+class DeploymentWorker(PeriodicTask):
     """Drain pending DeploymentItems. Start with `.start()`, stop with `.stop()`."""
 
     def __init__(
@@ -179,29 +178,23 @@ class DeploymentWorker:
         # once the worker lifespan wiring lands.
         self._wait_cloud_init = wait_cloud_init
         self._cloud_init_timeout_s = cloud_init_timeout_s
-        self._task: asyncio.Task[None] | None = None
-        self._stop_event = asyncio.Event()
+        self._task_name = "deployment-worker"
+        self._init_periodic()
 
     @property
     def provisioner(self) -> Provisioner:
         """The live Provisioner — force-redeploy (#216) borrows it via app.state."""
         return self._provisioner
 
-    def start(self) -> None:
-        if self._task is not None:
-            return
-        self._stop_event.clear()
-        self._task = asyncio.create_task(self._run(), name="deployment-worker")
+    async def _on_start(self) -> None:
+        recovered = await self.recover_stale_cloning()
+        if recovered:
+            logger.warning("recovered %s item(s) orphaned in 'cloning' by a prior crash", recovered)
 
-    async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._stop_event.set()
-        try:
-            await asyncio.wait_for(self._task, timeout=5.0)
-        except TimeoutError:
-            self._task.cancel()
-        self._task = None
+    async def _tick(self) -> bool:
+        # drain_once returns 1 when it processed an item (loop again at once),
+        # 0 when idle (wait one poll interval).
+        return await self.drain_once() > 0
 
     async def drain_once(self) -> int:
         """Process one pending item, if any. Returns 1 if work was done, 0 if idle.
@@ -217,23 +210,6 @@ class DeploymentWorker:
         if self._wait_cloud_init:
             return await self._advance_cloud_init()
         return 0
-
-    async def _run(self) -> None:
-        logger.info("deployment-worker started")
-        recovered = await self.recover_stale_cloning()
-        if recovered:
-            logger.warning("recovered %s item(s) orphaned in 'cloning' by a prior crash", recovered)
-        while not self._stop_event.is_set():
-            try:
-                processed = await self.drain_once()
-            except Exception:
-                logger.exception("deployment-worker loop error")
-                processed = 0
-            if processed == 0:
-                # idle backoff; cooperate with stop_event
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._stop_event.wait(), self._poll_interval_s)
-        logger.info("deployment-worker stopped")
 
     async def recover_stale_cloning(self) -> int:
         """Reset items stranded in 'cloning' past the lease back to 'pending'.
