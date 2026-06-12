@@ -1,0 +1,61 @@
+{
+  "display_name": "agent-platform-tenant-{{ tenant }}",
+  "category": "Application",
+  "sequence_number": {{ sequence_number }},
+  "stateful": true,
+  "tcp_strict": false,
+  "rules": [
+    {
+      "display_name": "allow-pcs-to-vms-mgmt",
+      "source_groups": ["/infra/domains/default/groups/grp-tenant-{{ tenant }}-pcs"],
+      "destination_groups": ["/infra/domains/default/groups/grp-tenant-{{ tenant }}-vms"],
+      "services": ["/infra/services/SSH", "/infra/services/RDP", "/infra/services/agent-platform-ttyd"],
+      "action": "ALLOW",
+      "logged": false
+    },
+    {
+      "display_name": "allow-pcs-to-fs-smb",
+      "source_groups": ["/infra/domains/default/groups/grp-tenant-{{ tenant }}-pcs"],
+      "destination_groups": ["/infra/domains/default/groups/grp-tenant-{{ tenant }}-fs"],
+      "services": ["/infra/services/SMB", "/infra/services/NFS"],
+      "action": "ALLOW",
+      "logged": false
+    },
+    {
+      "display_name": "allow-vms-to-fs-smb",
+      "source_groups": ["/infra/domains/default/groups/grp-tenant-{{ tenant }}-vms"],
+      "destination_groups": ["/infra/domains/default/groups/grp-tenant-{{ tenant }}-fs"],
+      "services": ["/infra/services/SMB", "/infra/services/NFS"],
+      "action": "ALLOW",
+      "logged": false
+    },
+    {
+      "display_name": "allow-vms-to-llm",
+      "source_groups": ["/infra/domains/default/groups/grp-tenant-{{ tenant }}-vms"],
+      "destination_groups": ["/infra/domains/default/groups/grp-tenant-{{ tenant }}-llm"],
+      "services": ["/infra/services/agent-platform-llm-8000"],
+      "action": "ALLOW",
+      "logged": false
+    },
+    {
+      "display_name": "deny-cross-tenant",
+      "source_groups": ["/infra/domains/default/groups/grp-tenant-{{ tenant }}-vms"],
+      "destination_groups": [{% for other in other_tenants %}
+        "/infra/domains/default/groups/grp-tenant-{{ other }}-vms",
+        "/infra/domains/default/groups/grp-tenant-{{ other }}-fs",
+        "/infra/domains/default/groups/grp-tenant-{{ other }}-llm"{{ "," if not loop.last else "" }}
+      {% endfor %}],
+      "services": ["ANY"],
+      "action": "DROP",
+      "logged": true
+    },
+    {
+      "display_name": "deny-vms-to-internet",
+      "source_groups": ["/infra/domains/default/groups/grp-tenant-{{ tenant }}-vms"],
+      "destination_groups": ["ANY"],
+      "services": ["ANY"],
+      "action": "DROP",
+      "logged": true
+    }
+  ]
+}

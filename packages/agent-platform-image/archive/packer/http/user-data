@@ -1,0 +1,112 @@
+#cloud-config
+# =============================================================================
+# cloud-init: agent-platform-base gold image
+# This file is parsed by cloud-init inside the VM on first boot.
+# It configures networking, users, SSH, NTP, and package updates.
+# =============================================================================
+
+# ── SSH ──────────────────────────────────────────────────────────────────────
+# Disable password authentication — key-only.
+ssh_pwauth: false
+
+# Add authorized keys for the default ubuntu user.
+# The `ssh_authorized_keys` variable is injected by Packer at build time
+# via templatefile() in agent-platform-base.pkr.hcl.
+ssh_authorized_keys:
+%{ if length(ssh_authorized_keys) > 0 ~}
+%{ for key in ssh_authorized_keys ~}
+  - "${key}"
+%{ endfor ~}
+%{ else ~}
+  # TODO (M1): add at least one key before production build
+  # - "ssh-ed25519 AAAA... admin@corp"
+%{ endif ~}
+
+# ── Users ─────────────────────────────────────────────────────────────────────
+# The ubuntu user already exists on the Ubuntu cloud image.
+# Lock its password (force key-only login).
+chpasswd:
+  expire: false
+  users:
+    - name: ubuntu
+      lock_passwd: true
+
+# ── Package update ───────────────────────────────────────────────────────────
+package_update: true
+# Do NOT run upgrade automatically — we control packages in Packer scripts.
+package_upgrade: false
+
+# ── Packages ──────────────────────────────────────────────────────────────────
+# open-vm-tools is mandatory for VMware guest agents / VMware Tools functionality.
+# cloud-init is mandatory for datasource to work.
+packages:
+  - open-vm-tools
+  - open-vm-tools-dkms
+  - cloud-init
+  - cloud-initramfs-growroot
+  - curl
+  - wget
+  - jq
+  - rsync
+  - git
+  - ca-certificates
+  - gnupg
+  - lsb-release
+
+# ── NTP ──────────────────────────────────────────────────────────────────────
+ntp:
+  enabled: true
+  ntp_client: systemd
+  servers:
+%{ if ntp_server != "" ~}
+    - "${ntp_server}"
+%{ else ~}
+    - "0.pool.ntp.org"
+    - "1.pool.ntp.org"
+%{ endif ~}
+
+# ── Network (configured by VMware / vSphere DHCP — cloud-init datasource) ────
+# Disable cloud-init network configuration to respect vSphere settings.
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      dhcp4: true
+      # Suppress predictive network interface rename (systemd-udev rule)
+      match:
+        driver: "vmxnet*|ens*|eth*"
+      set-name: eth0
+      wakeonlan: true
+
+# ── Power state ───────────────────────────────────────────────────────────────
+power_state:
+  mode: reboot
+  timeout: 300
+  message: "Agent Platform base image first-boot complete"
+
+# ── Run commands ──────────────────────────────────────────────────────────────
+runcmd:
+  # Grow root partition to fill disk (handles disk resize on first boot)
+  - [ bash, -c, "growpart /dev/sda 1 || true" ]
+  - [ bash, -c, "resize2fs /dev/sda1 || true" ]
+
+  # Enable and start VMware Tools / open-vm-tools services
+  - [ systemctl, enable, --now, vmtoolsd ]
+  - [ systemctl, enable, --now, vmware-tools-thinprint ]
+
+  # Disable snapd (not needed, saves disk IO and RAM)
+  - [ bash, -c, "systemctl disable --now snapd.appliance 2>/dev/null || true" ]
+
+  # Record build metadata (useful for audit / debugging)
+  - [ bash, -c, "echo 'agent_platform_base_image=$(date -u +%Y%m%d-%H%M%S)' > /etc/agent-platform-build-meta" ]
+
+  # Log cloud-init completion
+  - [ bash, -c, "cloud-init status --wait && echo 'CLOUDINIT=ok' >> /etc/agent-platform-build-meta || echo 'CLOUDINIT=failed' >> /etc/agent-platform-build-meta" ]
+
+# ── Final message ──────────────────────────────────────────────────────────────
+final_message: |
+  Agent Platform base image first boot complete.
+  Version: $${BUILD_DATE}
+  Uptime:  $${uptime}
+  Cloud-init: ok

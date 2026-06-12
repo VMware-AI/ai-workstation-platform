@@ -1,0 +1,57 @@
+# VM 套餐规格（决策 11）
+#
+# 每个 portal RequestAgent 表单四档对应一组完整的部署参数：
+#   - CPU / 内存 / 磁盘 (vSphere clone customization)
+#   - vCenter template inventory path（admin 准备模板后填）
+#   - 该套餐默认装哪个 agent（决策 2D plugin 框架）
+#   - agent 安装所需的 registry / 版本 / 模型
+#
+# M1 状态：所有数值是**占位**。客户硬件实测 + agent release 落定后调整。
+# M2 计划：迁到 DB 表 `vm_package_specs` 由 admin endpoint 维护（决策 11 → C）。
+
+packages:
+  agent-vm-small:
+    cpu: 2
+    memory_gb: 4
+    disk_gb: 50
+    # TODO(template): admin 注册客户实际 vCenter template 路径（决策 12 + 13）
+    template: "[templates] agent-platform-agent-small/agent-platform-agent-small.vmtx"
+    agent_kind: goose
+    agent_version: "1.34.1"
+    agent_registry_url: "registry.customer.internal/agent-platform"
+    agent_model: "qwen-coder-32b"
+
+  agent-vm-medium:
+    cpu: 4
+    memory_gb: 8
+    disk_gb: 100
+    template: "[templates] agent-platform-agent-medium/agent-platform-agent-medium.vmtx"
+    agent_kind: goose
+    agent_version: "1.34.1"
+    agent_registry_url: "registry.customer.internal/agent-platform"
+    agent_model: "qwen-coder-32b"
+
+  agent-vm-large:
+    cpu: 8
+    memory_gb: 16
+    disk_gb: 200
+    template: "[templates] agent-platform-agent-large/agent-platform-agent-large.vmtx"
+    agent_kind: goose
+    agent_version: "1.34.1"
+    agent_registry_url: "registry.customer.internal/agent-platform"
+    agent_model: "qwen-coder-32b"
+
+  agent-vm-gpu:
+    cpu: 8
+    memory_gb: 32
+    disk_gb: 200
+    template: "[templates] agent-platform-agent-gpu/agent-platform-agent-gpu.vmtx"
+    agent_kind: goose
+    agent_version: "1.34.1"
+    agent_registry_url: "registry.customer.internal/agent-platform"
+    agent_model: "qwen-coder-32b"
+    # TODO(gpu): 1× GPU passthrough（与决策 11 + C6 协同）
+
+# 默认配额（决策 15）— per-user / per-tenant 可在 M2 加 overrides
+default_quota:
+  vms_per_user: 3

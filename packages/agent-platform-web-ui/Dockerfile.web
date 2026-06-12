@@ -1,0 +1,58 @@
+# Web (Next.js) 容器（#266 Phase 1）。multi-stage：
+#   build  — 全量 deps + prisma generate + next build（也是 migrate/seed
+#            一次性服务的镜像 target：里面有 tsx 等 devDeps）
+#   govc   — 与 Dockerfile.worker 同源的 govc 二进制（版本/sha 必须一致，
+#            compose 统一传 build args 防漂移）
+#   runner — 生产 next start + 仅 prod deps + govc（inventory/deploy 路由
+#            通过 vsphere provider 调 govc CLI，web 不能只 next build）
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+# prisma.config.ts 必须随行：Prisma 7 的 datasource.url 只从它读——
+# 缺了它 migrate deploy 直接报错（schema.prisma 里没有 url）
+COPY prisma ./prisma
+COPY prisma.config.ts ./
+RUN npx prisma generate
+COPY tsconfig.json next.config.ts postcss.config.mjs ./
+COPY src ./src
+COPY public ./public
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npx next build
+
+FROM node:20-alpine AS govc
+ARG GOVC_VERSION=v0.54.1
+ARG GOVC_SHA256=f99e858fc93a59911eb191a69b48a00feabcbc3b659d5357ac08b9540ad01a11
+RUN wget -qO /tmp/govc.tar.gz "https://github.com/vmware/govmomi/releases/download/${GOVC_VERSION}/govc_Linux_x86_64.tar.gz" && \
+    echo "${GOVC_SHA256}  /tmp/govc.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/govc.tar.gz -C /usr/local/bin govc && \
+    chmod +x /usr/local/bin/govc
+
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+COPY --from=deps /app/node_modules ./node_modules
+# Prisma client 由 build 阶段生成（生成产物不随 npm ci 自动出现）
+COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=build /app/.next ./.next
+COPY --from=build /app/public ./public
+COPY --from=govc /usr/local/bin/govc /usr/local/bin/govc
+# next start 运行时要加载 next.config.ts 及其 import（security-headers #230）
+COPY package.json next.config.ts tsconfig.json prisma.config.ts ./
+COPY src/lib/security-headers.ts ./src/lib/security-headers.ts
+COPY prisma ./prisma
+
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 web && \
+    chown -R web:nodejs /app
+USER web
+EXPOSE 3000
+# 构建指纹（#313 同款）：启动第一行可断版本
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+CMD ["sh", "-c", "echo \"[web] git=$GIT_SHA node=$(node -v)\" && exec node_modules/.bin/next start"]

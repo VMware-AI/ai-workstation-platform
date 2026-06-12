@@ -1,0 +1,49 @@
+# Caddy reverse proxy for agent-platform-secrets / Vaultwarden.
+#
+# DOMAIN is injected from docker-compose env. Caddy's "tls internal"
+# directive is the default — it issues a Caddy-CA-signed cert for the
+# local domain so internal clients trust it after installing the Caddy
+# root. For a publicly-resolvable domain, comment out `tls internal`
+# and rely on the ACME issuer that runs by default; provide an admin
+# email via AGENT_PLATFORM_SECRETS_ACME_EMAIL.
+
+{
+	# Global options
+	email {$AGENT_PLATFORM_SECRETS_ACME_EMAIL}
+	# Acme staging is opt-in via env; production by default.
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$AGENT_PLATFORM_SECRETS_DOMAIN} {
+	# Internal CA by default. Swap to managed-by-Caddy ACME on a public
+	# domain by removing this line.
+	tls internal
+
+	# Defense headers. Vaultwarden's UI sets its own CSP at the app
+	# layer; we add the conservative transport-level guards Caddy
+	# cannot inject from the upstream.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		# Mask Caddy version
+		-Server
+	}
+
+	# Bitwarden mobile clients open a websocket; Vaultwarden serves it
+	# at /notifications/hub.
+	reverse_proxy /notifications/hub vaultwarden:3012
+
+	# Everything else proxies to the HTTP listener.
+	reverse_proxy vaultwarden:80 {
+		header_up X-Real-IP {remote_host}
+	}
+
+	# Aggressive rate limit on the admin panel.
+	# (Plug in https://github.com/mholt/caddy-ratelimit if available;
+	#  for the initial bring-up, leave at default and rely on
+	#  Vaultwarden's own per-IP throttling.)
+}

@@ -1,0 +1,162 @@
+# M0.2 评测 prompt 集（20 题 × 5 类别）
+# 关联 Issue: #38 / Plan: docs/plans/m0/0.2-agent-llm-eval-plan.md#task-7
+#
+# Schema:
+#   id:        p<NN>  (p01..p20)
+#   category:  code-gen | tool-single | tool-chain | i18n-code | long-context
+#   prompt:    完整 prompt（中文）
+#   setup:     可选 — bash 命令列表，runner 在 workdir 内执行
+#   grader:    exit-code-zero | code-runnable | llm-judge | file-exists
+#   expected_artifacts: 期望文件路径（grader 用）
+#   weight:    1.0 (默认) — 总分加权
+#   notes:     选题理由（runner 不读）
+
+prompts:
+
+  # ============ 1) 纯代码生成 (5 题) ============
+  - id: p01
+    category: code-gen
+    prompt: "用 Python 实现一个 LRU cache 类，支持泛型 key 和 value，线程安全，capacity 在构造时传入。提供 get/put/__len__/clear 方法。写到文件 cache.py 中。"
+    grader: code-runnable
+    expected_artifacts: ["cache.py"]
+    notes: 经典 LRU + 并发，考代码扎实度
+
+  - id: p02
+    category: code-gen
+    prompt: "写一个 Python 函数 parse_size('2.5GB') -> int，把人类可读大小（B/KB/MB/GB/TB，大小写不敏感，可带空格）转成字节数。无效输入抛 ValueError。写到 sizeparser.py。"
+    grader: code-runnable
+    expected_artifacts: ["sizeparser.py"]
+    notes: 字符串解析 + 错误处理
+
+  - id: p03
+    category: code-gen
+    prompt: "用 Python 实现一个简单的 retry 装饰器 @retry(times=3, backoff=2.0, exceptions=(Exception,))。失败重试，每次间隔指数 backoff。写到 retry.py。"
+    grader: code-runnable
+    expected_artifacts: ["retry.py"]
+    notes: 装饰器 + 闭包
+
+  - id: p04
+    category: code-gen
+    prompt: "写一个 SQL（PostgreSQL 14+）查询：表 orders(id, user_id, amount, created_at)，找出 2026 年每月销售额 top 3 的 user_id。结果列：month, user_id, total_amount, rank。写到 top_users.sql。"
+    grader: file-exists
+    expected_artifacts: ["top_users.sql"]
+    notes: 窗口函数 / GROUP BY
+
+  - id: p05
+    category: code-gen
+    prompt: "用 TypeScript 写一个 debounce<T extends (...args: any[]) => any>(fn: T, wait: number): T，保留 this/arguments。写到 debounce.ts，导出 default。"
+    grader: file-exists
+    expected_artifacts: ["debounce.ts"]
+    notes: TS 泛型 + 高阶函数
+
+  # ============ 2) 单工具调用 (5 题) ============
+  - id: p06
+    category: tool-single
+    prompt: "读取 fixtures/sample.json，提取 users 字段的长度并 print 出来。"
+    grader: exit-code-zero
+    notes: read_file
+
+  - id: p07
+    category: tool-single
+    prompt: "在当前目录下找出所有 .py 文件中包含 'TODO' 字样的行，输出 file:line:text 格式。"
+    setup:
+      - "mkdir -p src && echo 'x=1  # TODO refactor' > src/a.py && echo 'def f(): pass' > src/b.py && echo '# TODO doc' > src/c.py"
+    grader: exit-code-zero
+    notes: grep / search
+
+  - id: p08
+    category: tool-single
+    prompt: "把 input.txt 里所有的 'localhost' 替换成 '127.0.0.1'，结果写回 input.txt（原地修改）。"
+    setup:
+      - "echo 'http://localhost:8080/api\\nlocalhost.local\\nremote' > input.txt"
+    grader: exit-code-zero
+    notes: edit_file
+
+  - id: p09
+    category: tool-single
+    prompt: "执行 shell 命令 `uname -s` 并把输出（去空白后）写入 os.txt。"
+    grader: file-exists
+    expected_artifacts: ["os.txt"]
+    notes: bash exec
+
+  - id: p10
+    category: tool-single
+    prompt: "在当前目录创建文件 hello.txt，内容是 'Hello, AI Workstation'（不带尾换行）。"
+    grader: file-exists
+    expected_artifacts: ["hello.txt"]
+    notes: write_file 最简
+
+  # ============ 3) 多工具链 (5 题) ============
+  - id: p11
+    category: tool-chain
+    prompt: "在 src/ 下找出所有 import 了 'requests' 库的 .py 文件，把这些文件名列出来写到 deps.txt（一行一个）。"
+    setup:
+      - "mkdir -p src && echo 'import requests' > src/a.py && echo 'from requests import get' > src/b.py && echo 'import json' > src/c.py"
+    grader: exit-code-zero
+    notes: grep → list → write
+
+  - id: p12
+    category: tool-chain
+    prompt: "读 fixtures/users.csv（列：name,email,department），统计每个 department 的人数，结果按人数倒序写到 dept_count.csv（列：department,count）。"
+    grader: code-runnable
+    expected_artifacts: ["dept_count.csv"]
+    notes: read → aggregate → write
+
+  - id: p13
+    category: tool-chain
+    prompt: "在 src/ 下找一个名为 compute_total 的函数，把它重命名为 calculate_total，所有引用一起改，最后跑 `python -c 'from src.main import calculate_total; print(calculate_total([1,2,3]))'` 必须输出 6。"
+    setup:
+      - "mkdir -p src && echo 'def compute_total(xs): return sum(xs)' > src/main.py && touch src/__init__.py"
+    grader: exit-code-zero
+    notes: refactor → rename → verify
+
+  - id: p14
+    category: tool-chain
+    prompt: "下载/读取 fixtures/sales.json，找出 amount 最高的 3 个 transaction，生成一份 Markdown 报告 report.md，含：表头 | id | user | amount |，并在最上面写一句概述。"
+    grader: file-exists
+    expected_artifacts: ["report.md"]
+    notes: read → analyze → markdown 生成
+
+  - id: p15
+    category: tool-chain
+    prompt: "在当前目录建一个 Python 项目骨架: src/__init__.py, src/main.py (含 def hello() 返回 'hi'), tests/test_main.py (pytest 测试 hello()=='hi'), pyproject.toml (含 ruff 配置)。最后跑 pytest 必须 PASS。"
+    grader: exit-code-zero
+    notes: scaffold → test
+
+  # ============ 4) 中文理解 + 代码 (3 题) ============
+  - id: p16
+    category: i18n-code
+    prompt: "写一个 Python 函数，输入是一个中文姓名字符串（如 '王小明'），输出是英文拼音首字母大写形式（如 'WXM'）。要支持多字姓（'欧阳' → 'OY'）。允许使用第三方库 pypinyin。写到 pinyin_initials.py。"
+    grader: code-runnable
+    expected_artifacts: ["pinyin_initials.py"]
+    notes: 中文意图 + 字符处理
+
+  - id: p17
+    category: i18n-code
+    prompt: "我有一个包含中英文混合的文档 mixed.txt，请写一个脚本 count_lang.py，统计其中中文字符数 / 英文字符数 / 数字数 / 标点数 / 空白数，结果 print 成 'chinese=X english=Y digit=Z punct=W space=V'。"
+    setup:
+      - "echo 'Hello 你好 World, this is 测试 123。' > mixed.txt"
+    grader: code-runnable
+    expected_artifacts: ["count_lang.py"]
+    notes: Unicode 类别判断
+
+  - id: p18
+    category: i18n-code
+    prompt: "我们需要给员工自动生成 VM 用户名。规则：把中文姓名转拼音全小写无空格（如 '张三' → 'zhangsan'）；如果重名则末尾加数字（zhangsan / zhangsan2 / zhangsan3）。写一个 Python 函数 generate_username(name: str, existing: set[str]) -> str。写到 username_gen.py。"
+    grader: code-runnable
+    expected_artifacts: ["username_gen.py"]
+    notes: 业务上下文 + 中文理解 + 业务规则
+
+  # ============ 5) 长上下文 (2 题) ============
+  - id: p19
+    category: long-context
+    prompt: "请读 fixtures/big_log.txt（约 5000 行 nginx access log），找出 status >= 500 的请求，按出现频次给出 top 5 的 URL（不含 query string），输出格式 'count\\tpath'。"
+    grader: exit-code-zero
+    notes: 长上下文 + filter + aggregate
+
+  - id: p20
+    category: long-context
+    prompt: "读 fixtures/spec.md（约 4000 字的产品需求文档），用中文写一份 ≤300 字的摘要，列出 3 个核心功能 + 2 个待澄清的开放问题，写到 summary.md。"
+    grader: llm-judge
+    expected_artifacts: ["summary.md"]
+    notes: 长文摘要 + 中文表达

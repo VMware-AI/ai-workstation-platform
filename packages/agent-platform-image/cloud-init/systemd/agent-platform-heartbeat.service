@@ -1,0 +1,12 @@
+[Unit]
+Description=Agent Platform VM heartbeat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/agent-platform-heartbeat
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

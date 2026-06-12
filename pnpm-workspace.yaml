@@ -1,0 +1,3 @@
+packages:
+  - 'packages/agent-platform-console'
+  - 'packages/agent-platform-portal'

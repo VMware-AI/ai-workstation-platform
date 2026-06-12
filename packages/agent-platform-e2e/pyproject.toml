@@ -1,0 +1,40 @@
+[project]
+name = "agent-platform-e2e"
+version = "0.1.0"
+description = "Agent Platform M1.26: 10-step acceptance demo end-to-end test framework"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "VMware-AI / Agent Platform team"}]
+dependencies = [
+    "httpx>=0.27",
+    "playwright>=1.47",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-playwright>=0.5",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "bandit>=1.7",
+]
+
+[project.scripts]
+agent-platform-e2e-record = "agent_platform_e2e.record:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_platform_e2e"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "hw_blocked: requires real hardware (GPU / NSX / vSAN) not present in this env",
+    "demo_step(n): which step (1-10) of the M1.26 demo this test covers",
+]

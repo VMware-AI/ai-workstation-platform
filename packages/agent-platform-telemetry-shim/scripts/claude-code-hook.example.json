@@ -1,0 +1,16 @@
+{
+  "_comment": "Drop this into ~/.claude/settings.json under the existing 'hooks' key. Claude Code reads it at startup; PostToolUse fires after every tool call. The hook command must be on PATH — installed via `uv tool install agent-platform-telemetry-shim`. Required env vars (AGENT_PLATFORM_TELEMETRY_BASE_URL, AGENT_PLATFORM_TELEMETRY_TOKEN) are typically baked into the agent VM by cloud-init.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agent-platform-tele-claude-code"
+          }
+        ]
+      }
+    ]
+  }
+}

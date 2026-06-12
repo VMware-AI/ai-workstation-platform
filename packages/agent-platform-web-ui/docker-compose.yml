@@ -1,0 +1,149 @@
+# govc 版本单一来源（#266）：四个 build 共享；Dockerfile ARG 默认值仅作
+# 直接 docker build 的后备——经 compose 构建时以这里为准。升级改这里。
+x-govc-args: &govc-args
+  GOVC_VERSION: "${GOVC_VERSION:-v0.54.1}"
+  GOVC_SHA256: "${GOVC_SHA256:-f99e858fc93a59911eb191a69b48a00feabcbc3b659d5357ac08b9540ad01a11}"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: agent-platform-web-ui-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agentplatform}
+      # Required — no default. Generate with: openssl rand -hex 24
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var is required}
+      POSTGRES_DB: ${POSTGRES_DB:-agentplatform}
+    # Bind to loopback only so the DB is not exposed beyond the dev machine.
+    # For remote access, use `docker exec` or an SSH tunnel.
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentplatform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: agent-platform-web-ui-redis
+    # Same loopback policy as postgres — keep dev services off the LAN.
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 一次性迁移 job（#266 Phase 2）：web/worker 必须等它成功后才启动，
+  # 否则启动期 reaper / 首个请求打到空 schema。复用 web 镜像的 build
+  # 阶段（里面有 prisma CLI——devDep，不进 runner）。幂等：migrate deploy
+  # 重复执行是 no-op。
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      target: build
+      args:
+        <<: *govc-args
+    container_name: agent-platform-web-ui-migrate
+    command: ["npx", "prisma", "migrate", "deploy"]
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-agentplatform}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var is required}@postgres:5432/${POSTGRES_DB:-agentplatform}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # 可选 demo 账号 seed（#266）：docker compose --profile seed run --rm seed
+  # 复用 build 阶段镜像（tsx 是 devDep）。
+  seed:
+    profiles: ["seed"]
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      target: build
+      args:
+        <<: *govc-args
+    command: ["npx", "tsx", "prisma/seed.ts"]
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-agentplatform}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var is required}@postgres:5432/${POSTGRES_DB:-agentplatform}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # Web（#266 Phase 1）：生产 next start，内置 govc（inventory/deploy 路由
+  # 在容器内调 govc CLI）。容器内 DB/Redis 走服务名（#261 同款），其余
+  # 密钥从 .env 透传（environment 覆盖 env_file 同名项）。
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        <<: *govc-args
+        GIT_SHA: "${GIT_SHA:-unknown}"
+    container_name: agent-platform-web-ui-web
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-agentplatform}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var is required}@postgres:5432/${POSTGRES_DB:-agentplatform}
+      - REDIS_URL=redis://redis:6379
+      # Fail at compose-parse time, not at container boot (env-check H-13).
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY env var is required (64 hex chars; run npm run setup:env)}
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/login || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  provisioner-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      args:
+        <<: *govc-args
+        GIT_SHA: "${GIT_SHA:-unknown}"
+    container_name: agent-platform-web-ui-worker
+    # Pass the full .env through (same as web): the worker reads more than the
+    # old 5-var whitelist — cloud-init generation needs AGENT_PKG_BASE_URL /
+    # AGENT_XIAOGUAI_SHA256 (offline agent install, #286) and provision.ts reads
+    # CONTROL_PLANE_URL (agent self-registration, #231). Whitelisting silently
+    # disabled all of those under compose.
+    env_file: .env
+    environment:
+      # Inside the compose network, reach Postgres/Redis by SERVICE NAME — the
+      # .env DATABASE_URL/REDIS_URL point at 127.0.0.1, which from in here would
+      # resolve to this container itself, not the db. Password still comes from
+      # .env's POSTGRES_PASSWORD; only the host part is overridden.
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-agentplatform}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var is required}@postgres:5432/${POSTGRES_DB:-agentplatform}
+      - REDIS_URL=redis://redis:6379
+      # Fail at compose-parse time, not at container boot (env-check H-13).
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY env var is required (64 hex chars; run npm run setup:env)}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,0 +1,39 @@
+[project]
+name = "agent-platform-llm-gateway"
+version = "0.1.0"
+description = "Agent Platform C5: LiteLLM Proxy gateway with per-key budget + rate-limit logging"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "VMware-AI / Agent Platform team"}]
+dependencies = [
+    # litellm 1.85+ moves the proxy extra to uvicorn==0.33.0 / fastapi==0.124.4,
+    # the first range compatible with agent-platform-control's uvicorn[standard]>=0.32.
+    # 1.55–1.84 pin uvicorn<0.30 and break workspace `uv sync`. Gateway only
+    # subprocess-execs `litellm --config`, so the bump is API-safe (CLI args
+    # --config/--port/--host/--num_workers are stable).
+    "litellm[proxy]>=1.85.0,<2.0",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    # C18 secret resolution at startup (harness H-11, #212)
+    "agent-platform-secrets>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",  # test_callbacks.py has async tests; without this they error out
+    "pytest-cov>=5.0",
+]
+
+[project.scripts]
+agent-platform-llm-gateway = "agent_platform_llm_gateway.cli:app"
+
+[tool.uv.sources]
+agent-platform-secrets = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_platform_llm_gateway"]

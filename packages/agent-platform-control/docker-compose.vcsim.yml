@@ -1,0 +1,22 @@
+# vcsim — VMware vCenter Simulator for C1 integration tests.
+# https://github.com/vmware/govmomi/tree/main/vcsim
+#
+# Usage:
+#   docker compose -f docker-compose.vcsim.yml up -d
+#   export VCSIM_URL=https://localhost:8989 VCSIM_USER=user VCSIM_PASS=pass
+#   uv run pytest -m integration
+#   docker compose -f docker-compose.vcsim.yml down
+
+services:
+  vcsim:
+    image: vmware/vcsim:v0.46.3
+    container_name: agent-platform-vcsim
+    command: ["-l", "0.0.0.0:8989"]
+    ports:
+      - "8989:8989"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://localhost:8989/sdk || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s

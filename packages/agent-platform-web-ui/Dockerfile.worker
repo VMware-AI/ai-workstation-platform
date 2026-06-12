@@ -1,0 +1,58 @@
+# Build stage: full deps (esbuild + prisma CLI are devDeps), generate the
+# Prisma client, bundle the worker to plain JS. The bundle resolves the
+# "@/lib/*" tsconfig path aliases at build time; node_modules stay external
+# (--packages=external), so prod gets real deps + one small JS file.
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY prisma ./prisma
+RUN npx prisma generate
+COPY tsconfig.json tsconfig.worker.json ./
+COPY src/lib ./src/lib
+COPY worker ./worker
+COPY scripts/build-worker.mjs ./scripts/build-worker.mjs
+# 构建指纹（#313）：.git 不进镜像，sha 由 build arg 透传；缺省 unknown 不破坏构建
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+RUN npm run build:worker
+
+# govc CLI for vsphere provisioning (#234) — pinned release, sha256-verified.
+# 版本/sha 必须与 Dockerfile.web 的 govc 阶段一致：compose 从同一组
+# GOVC_VERSION/GOVC_SHA256 变量统一传两边（#266）。
+# against the official checksums.txt (cross-checked by independent download).
+# govc is a static Go binary, so it runs on musl/alpine as-is.
+# To bump: update GOVC_VERSION + GOVC_SHA256 together from
+#   https://github.com/vmware/govmomi/releases/download/<ver>/checksums.txt
+FROM node:20-alpine AS govc
+ARG GOVC_VERSION=v0.54.1
+ARG GOVC_SHA256=f99e858fc93a59911eb191a69b48a00feabcbc3b659d5357ac08b9540ad01a11
+RUN wget -qO /tmp/govc.tar.gz "https://github.com/vmware/govmomi/releases/download/${GOVC_VERSION}/govc_Linux_x86_64.tar.gz" && \
+    echo "${GOVC_SHA256}  /tmp/govc.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/govc.tar.gz -C /usr/local/bin govc && \
+    rm /tmp/govc.tar.gz
+
+# Production dependencies only — no tsx / dev runtime in the final image (#229).
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY --from=deps /app/node_modules ./node_modules
+# Generated Prisma client comes from the build stage (generate 产物不随
+# npm ci 自动出现).
+COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=build /app/dist ./dist
+COPY --from=govc /usr/local/bin/govc /usr/local/bin/govc
+COPY prisma ./prisma
+
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 worker && \
+    chown -R worker:nodejs /app
+USER worker
+
+CMD ["node", "dist/worker/index.js"]

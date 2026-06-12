@@ -1,0 +1,26 @@
+[Unit]
+Description=Agent Platform goose agent
+After=network-online.target docker.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/agent-platform/goose.env
+ExecStart=/usr/local/bin/agent-platform-goose-launch
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening (does NOT cover the docker case — the container
+# itself runs as non-root user inside, and host docker socket is implicit).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+PrivateTmp=true
+ReadWritePaths=/etc/agent-platform /home
+
+[Install]
+WantedBy=multi-user.target

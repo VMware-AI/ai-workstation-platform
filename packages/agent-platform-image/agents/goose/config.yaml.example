@@ -1,0 +1,16 @@
+# Goose config — written to ~/.config/goose/config.yaml inside the container.
+#
+# The container reads env vars (set by agent-platform-control when the VM is provisioned),
+# so this file is informational; goose itself prefers env over file when both are set.
+#
+# Provided here for operator reference + offline (tarball fallback) installs.
+
+GOOSE_PROVIDER: openai
+GOOSE_MODEL: qwen-coder-32b
+
+# LiteLLM gateway URL — overridden by OPENAI_HOST env.
+OPENAI_HOST: http://agent-platform-llm-gateway:4000
+
+# Per-user token — overridden by OPENAI_API_KEY env.
+# DO NOT commit a real token.
+OPENAI_API_KEY: PLACEHOLDER_REPLACE_ME

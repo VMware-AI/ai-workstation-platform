@@ -1,0 +1,19 @@
+{
+  "transactions": [
+    {"id": "T001", "user": "alice", "amount": 1200.50, "ts": "2026-04-01"},
+    {"id": "T002", "user": "bob",   "amount":  300.00, "ts": "2026-04-02"},
+    {"id": "T003", "user": "carol", "amount": 8900.00, "ts": "2026-04-02"},
+    {"id": "T004", "user": "dave",  "amount":  150.00, "ts": "2026-04-03"},
+    {"id": "T005", "user": "alice", "amount": 2450.00, "ts": "2026-04-04"},
+    {"id": "T006", "user": "eve",   "amount":  990.00, "ts": "2026-04-05"},
+    {"id": "T007", "user": "frank", "amount": 7200.00, "ts": "2026-04-06"},
+    {"id": "T008", "user": "bob",   "amount":   75.00, "ts": "2026-04-07"},
+    {"id": "T009", "user": "carol", "amount": 3300.00, "ts": "2026-04-08"},
+    {"id": "T010", "user": "dave",  "amount":  430.00, "ts": "2026-04-09"},
+    {"id": "T011", "user": "alice", "amount": 5500.00, "ts": "2026-04-10"},
+    {"id": "T012", "user": "grace", "amount": 6700.00, "ts": "2026-04-11"},
+    {"id": "T013", "user": "eve",   "amount":  220.00, "ts": "2026-04-12"},
+    {"id": "T014", "user": "henry", "amount": 1900.00, "ts": "2026-04-13"},
+    {"id": "T015", "user": "carol", "amount":  840.00, "ts": "2026-04-14"}
+  ]
+}

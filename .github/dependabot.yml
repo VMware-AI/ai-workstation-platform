@@ -1,0 +1,46 @@
+# SEC-23: automated dependency + action updates. Without this, pinning actions
+# to SHAs (SEC-22) would freeze them on whatever version had a known CVE — this
+# is the patch channel that keeps the pins moving.
+version: 2
+updates:
+  # GitHub Actions across both workflows — bumps the SHA pins from SEC-22.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+
+  # Node / pnpm workspace (web-ui is the active app; console/portal share the
+  # root pnpm-lock.yaml). Caught the react-router CVE (SEC-20).
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+
+  # Python services (uv workspace at the repo root). This bumps declared
+  # workspace deps. NOTE: the inline `uvx ruff@<ver>` / `uvx bandit@<ver>` pins
+  # in ci.yml are NOT dependency-graph entries, so this updater cannot see them;
+  # bump those two by hand (or via the github-actions PRs that touch ci.yml)
+  # when ruff/bandit cut a release. They are pinned (#356) so an upstream
+  # release can't silently turn main red.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+
+  # goose agent image — base image digest + apt layers.
+  - package-ecosystem: docker
+    directory: /packages/agent-platform-image/agents/goose
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"

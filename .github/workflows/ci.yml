@@ -1,0 +1,350 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  # Run on PRs targeting any base, not just main. Stacked PRs (e.g. PR #82 / #83
+  # targeting another feature branch) were silently skipped under the previous
+  # `branches: [main]` filter, leaving them merged without CI coverage.
+  pull_request:
+
+# Cancel superseded runs for the same ref so rapid pushes during PR iteration
+# don't each burn a full 15-job run (Actions minutes are metered on this private
+# repo — the 2026-06 budget exhaustion halted ALL CI). Only PRs are cancelled;
+# every push to main still builds (cancel-in-progress is false there) so no
+# merged commit goes unbuilt.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# SEC-24: least-privilege by default for the whole workflow rather than relying
+# on the repo/org GITHUB_TOKEN default (which may be read-write). Jobs that need
+# more (e.g. `changes` needs pull-requests:read) widen it at the job level.
+permissions:
+  contents: read
+
+jobs:
+  # Detect which areas a PR touched so unaffected jobs can skip and stop burning
+  # minutes on scoped PRs (a web-ui-only PR no longer runs the Python suite +
+  # vcsim, and a Python-only PR no longer runs the ~1.5-min Next build).
+  #
+  # REQUIRED-CHECK SAFETY: single jobs gated by `if:` below report a "skipped"
+  # conclusion, which branch protection counts as passing — safe even if they
+  # are required checks. The unit-tests MATRIX is deliberately NOT job-gated: a
+  # skipped matrix never creates its per-leg `unit-tests (pkg)` checks, and a
+  # required check that is never created hangs the PR forever. Instead the
+  # matrix job always runs and gates its expensive STEPS, so each leg still
+  # reports. Every filter includes this workflow file, so any CI change re-runs
+  # the full suite (and validates these gates end to end on its own PR).
+  changes:
+    runs-on: ubuntu-latest
+    # dorny/paths-filter lists the PR's changed files via the GitHub API, which
+    # needs pull-requests:read. The repo's default GITHUB_TOKEN is restricted to
+    # contents:read, so grant it here (job-scoped — other jobs are unaffected).
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      web_ui: ${{ steps.filter.outputs.web_ui }}
+      shell: ${{ steps.filter.outputs.shell }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'packages/**/*.py'
+              - 'packages/**/pyproject.toml'
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'eval/**'
+              - 'scripts/**'
+              - '.github/workflows/ci.yml'
+            web_ui:
+              - 'packages/agent-platform-web-ui/**'
+              - '.github/workflows/ci.yml'
+            shell:
+              - 'packages/agent-platform-image/cloud-init/scripts/**'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'packages/agent-platform-console/**'
+              - 'packages/agent-platform-portal/**'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.github/workflows/ci.yml'
+            e2e:
+              - 'packages/agent-platform-e2e/**'
+              - '.github/workflows/ci.yml'
+
+  # Enforcing (#59 + harness doc 34 H-2): every package with a test suite runs,
+  # and a failure blocks the merge. Workspace members are virtual (not installed
+  # into the root venv), so each package runs in its own dir via the uniform
+  # `uv run --extra dev pytest` (workspace-aware). control additionally enforces
+  # a coverage floor (H-5). Steps gate on `python` (not the whole job) so the
+  # per-leg required checks still report on non-Python PRs (see `changes`).
+  unit-tests:
+    needs: changes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg:
+          - agent-platform-control
+          - agent-platform-approval
+          - agent-platform-secrets
+          - agent-platform-telemetry-shim
+          - agent-platform-agent-adapter
+          - agent-platform-scale-bundle
+          - agent-platform-repo
+          - agent-platform-llm-gateway
+          - agent-platform-image
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        if: needs.changes.outputs.python == 'true'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.10.0"
+      - name: Set up Python
+        if: needs.changes.outputs.python == 'true'
+        run: uv python install 3.11
+      - name: ${{ matrix.pkg }} unit tests
+        if: needs.changes.outputs.python == 'true'
+        working-directory: packages/${{ matrix.pkg }}
+        run: >-
+          uv run --extra dev ${{ matrix.pkg == 'agent-platform-control' && '--with pytest-cov' || '' }}
+          pytest -m "not integration and not e2e"
+          ${{ matrix.pkg == 'agent-platform-control' && '--cov=src/agent_platform_control --cov-fail-under=75' || '' }}
+          -p no:cacheprovider
+
+  # Structural / drift / isolation guards (harness doc 34 H-1/H-3/H-4) — all
+  # enforcing. These caught a broken-by-rename file, would catch model↔migration
+  # drift, and enforce the Decision-14 tenant-scope isolation lint.
+  guards:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.10.0"
+      - name: Set up Python
+        run: uv python install 3.11
+      - name: Python syntax sweep (every package file must parse)
+        run: |
+          python3 - <<'PY'
+          import ast, glob, sys
+          bad = []
+          for f in glob.glob('packages/**/*.py', recursive=True):
+              if '/node_modules/' in f or '/.venv/' in f:
+                  continue
+              try:
+                  ast.parse(open(f, encoding='utf-8').read())
+              except SyntaxError as e:
+                  bad.append(f"{f}:{e.lineno} {e.msg}")
+          if bad:
+              print("SYNTAX ERRORS:")
+              print("\n".join(bad))
+              sys.exit(1)
+          print("all package python parses")
+          PY
+      - name: Alembic upgrade head (model↔migration drift)
+        working-directory: packages/agent-platform-control
+        env:
+          AGENT_PLATFORM_DATABASE_URL: "sqlite+aiosqlite:////tmp/ci_migrations.db"
+        run: uv run --extra dev alembic upgrade head
+      - name: Tenant-scope isolation lint (Decision 14)
+        run: bash scripts/check_tenant_scope.sh
+      # H-8: the eval harness (graders + capability evals) had real assertions
+      # but no CI ever ran it. Now enforcing — a broken grader fails the build.
+      - name: Eval harness tests
+        working-directory: eval
+        env:
+          PYTHONPATH: .
+        run: uv run --no-project --with pytest --with pyyaml pytest tests grader_tests -p no:cacheprovider
+
+  # Workspace resolution + quality gates. Sync is enforcing (catches missing
+  # tool.uv.sources — #59). Lint/format/bandit are BLOCKING since #217
+  # (cross-package lint debt cleared; by-design findings carry noqa/nosec
+  # with reasons).
+  quality:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.10.0"
+      - name: Set up Python
+        run: uv python install 3.11
+      - name: Sync workspace
+        run: uv sync --all-extras --dev
+      # Pin ruff/bandit to exact versions so an upstream release can never turn
+      # main red on its own (new lint rules / format tweaks) and so CI matches
+      # local dev. Bumps come through dependabot (uv ecosystem, see
+      # .github/dependabot.yml) which proposes the new pin as a reviewable PR.
+      - name: Ruff format check
+        run: uvx ruff@0.15.17 format --check .
+      - name: Ruff lint
+        run: uvx ruff@0.15.17 check .
+      - name: Bandit
+        run: uvx bandit@1.9.4 -r packages/ -c pyproject.toml
+
+  shell:
+    needs: changes
+    if: needs.changes.outputs.shell == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Shellcheck cloud-init scripts
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        with:
+          scandir: packages/agent-platform-image/cloud-init/scripts
+          severity: warning
+
+  # The e2e suite is --ignore'd by the root pytest (heavyweight playwright deps,
+  # runs standalone). It still has an import chain + fixture signatures that rot
+  # silently — a renamed env field or a bad fixture only surfaced on a real
+  # staging run. This cheap leg collects the suite (no browser, no hardware) so
+  # import/fixture breakage fails a PR instead. #356.
+  e2e-collect:
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.10.0"
+      - name: Set up Python
+        run: uv python install 3.11
+      - name: Collect e2e suite (import + fixture-signature check)
+        working-directory: packages/agent-platform-e2e
+        run: uv run pytest --collect-only -q -p no:cacheprovider
+
+  vcsim:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    services:
+      vcsim:
+        image: vmware/vcsim:v0.46.3
+        ports:
+          - "8989:8989"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.10.0"
+      - name: Set up Python
+        run: uv python install 3.11
+      - name: Wait for vcsim
+        run: |
+          for _ in $(seq 1 30); do
+            status="$(curl -ksS -o /dev/null -w '%{http_code}' https://localhost:8989/sdk || true)"
+            if [ "${status}" = "200" ] || [ "${status}" = "400" ] || [ "${status}" = "405" ]; then
+              echo "VCSIM_URL=https://localhost:8989" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs "${{ job.services.vcsim.id }}"
+          exit 1
+      - name: Run C1 integration tests against vcsim
+        working-directory: packages/agent-platform-control
+        # VCSIM_URL is exported into $GITHUB_ENV by the "Wait for vcsim" step
+        # above; the test reads VCSIM_URL/VCSIM_USER/VCSIM_PASS from env.
+        env:
+          VCSIM_USER: user
+          VCSIM_PASS: pass
+        # `--extra dev` resolves the full closure from control's pyproject
+        # (workspace siblings + pytest extras) instead of a hand-copied `--with`
+        # list that drifts from the real deps. #356.
+        run: uv run --extra dev pytest tests/test_vmware_provisioner_integration.py -m integration -v
+
+  # C21 web-ui (npm, not pnpm — the frontend job below skips it). Gates
+  # lint + typecheck (app & worker tsconfigs) + vitest + production build
+  # (the build runs without .env by design — instrumentation skips the
+  # build phase, see #214/#218).
+  web-ui:
+    needs: changes
+    if: needs.changes.outputs.web_ui == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/agent-platform-web-ui
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: packages/agent-platform-web-ui/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Prisma client
+        run: npx prisma generate
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck (app)
+        run: npx tsc --noEmit
+      - name: Typecheck (worker)
+        run: npx tsc --noEmit -p tsconfig.worker.json
+      - name: Unit tests
+        run: npm test
+      - name: Production build (no .env — must not require secrets)
+        run: npx next build
+
+  # C2 console + C12 portal (pnpm workspace). Typecheck/lint are enforcing
+  # across the workspace (both packages green as of this change — the old
+  # continue-on-error escape hatches are gone). Tests run for the console
+  # only: the portal is DEPRECATED (doc 31, slated for removal) so it keeps
+  # the cheap static gates but doesn't grow a test obligation. Single job
+  # gated by `if:` — skipped conclusion counts as passing for branch
+  # protection (see REQUIRED-CHECK SAFETY note on `changes` above).
+  frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check for pnpm lockfile
+        id: check_lock
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "::notice::No pnpm-lock.yaml yet — skipping frontend job (will activate once console/portal initialized)"
+          fi
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6
+        if: steps.check_lock.outputs.exists == 'true'
+        with:
+          version: 9
+      - uses: actions/setup-node@v5
+        if: steps.check_lock.outputs.exists == 'true'
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install
+        if: steps.check_lock.outputs.exists == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Type check
+        if: steps.check_lock.outputs.exists == 'true'
+        run: pnpm -r typecheck
+      - name: Lint
+        if: steps.check_lock.outputs.exists == 'true'
+        run: pnpm -r lint
+      - name: Console unit tests
+        if: steps.check_lock.outputs.exists == 'true'
+        run: pnpm --filter @agent-platform/console test

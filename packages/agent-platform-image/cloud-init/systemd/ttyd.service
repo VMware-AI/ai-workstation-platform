@@ -1,0 +1,28 @@
+[Unit]
+Description=Agent Platform web terminal (ttyd) for portal Terminal page
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# -W = allow input (otherwise the portal terminal is read-only).
+# -p 7681 binds 0.0.0.0:7681 — direct portal → VM:7681 access per
+# docs/architecture/29 §3.1 (M1 trusted-network assumption; M2 adds an
+# HMAC token sidecar in front of ttyd via a W-3.3 follow-up).
+ExecStart=/usr/local/bin/ttyd -p 7681 -W bash
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening: ttyd legitimately needs a writable shell, so we don't lock
+# the home directories. NoNewPrivileges still blocks privilege escalation.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

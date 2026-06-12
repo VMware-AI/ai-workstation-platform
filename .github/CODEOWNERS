@@ -1,0 +1,21 @@
+# Default owner — fill in actual handles after collaborators added
+* @zw008
+
+# Components — assign by component owner once handles confirmed
+/packages/agent-platform-control/         @zw008
+/packages/agent-platform-console/         @zw008
+/packages/agent-platform-image/           @zw008
+/packages/agent-platform-repo/            @zw008
+/packages/agent-platform-llm-gateway/     @zw008
+/packages/agent-platform-llm-runtime/     @zw008
+/packages/agent-platform-telemetry-shim/  @zw008
+/packages/agent-platform-installer/       @zw008
+/packages/agent-platform-scale-bundle/    @zw008
+/packages/agent-platform-portal/          @zw008
+/packages/agent-platform-approval/        @zw008
+/packages/agent-platform-pool-scheduler/  @zw008
+/packages/agent-platform-secrets/         @zw008
+/packages/agent-platform-fileshare/       @zw008
+/packages/agent-platform-agent-adapter/   @zw008
+
+/.github/      @zw008

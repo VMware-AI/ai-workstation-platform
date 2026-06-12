@@ -1,0 +1,43 @@
+[Unit]
+Description=Agent Platform LLM Gateway (LiteLLM Proxy)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=agent-platform
+Group=agent-platform
+WorkingDirectory=/var/lib/agent-platform-llm-gateway
+EnvironmentFile=-/etc/agent-platform-llm-gateway/.env
+ExecStartPre=/usr/local/bin/agent-platform-llm-gateway validate \
+  --config /etc/agent-platform-llm-gateway/config.yaml
+ExecStart=/usr/local/bin/agent-platform-llm-gateway start \
+  --config /etc/agent-platform-llm-gateway/config.yaml \
+  --port 4000 \
+  --host 0.0.0.0 \
+  --num-workers 2
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent-platform-llm-gateway
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agent-platform-llm-gateway /var/log/agent-platform
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

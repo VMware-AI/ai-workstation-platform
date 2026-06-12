@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+.uv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+.pnpm-store/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/settings.json.example
+
+# Build artifacts
+*.ova
+*.iso
+*.tar.zst
+*.whl
+/eval/runs/
+/eval/results/
+/poc/**/*.log
+
+# Local PoC env
+poc/**/.env
+
+# Internal discussion docs (not for public repo)
+*.docx
+*.doc
+
+# Customer research files may contain private infra details.
+docs/research/customers/*.md
+!docs/research/customers/README.md
+!docs/research/customers/_template.md
+*.pkrvars.hcl
+
+# doc 23 dev-up artifacts
+*.sqlite
+*.sqlite-journal
+local.db
+# C1 dev SQLite (default AGENT_PLATFORM_DATABASE_URL target, created by db init / boot)
+agent-platform-control.db
+agent-platform-control.db-journal
+agent-platform-control.db-wal
+agent-platform-control.db-shm
+.dev-logs/
+*.pid
+
+# Local Claude Code agent session state (not shared)
+.claude/

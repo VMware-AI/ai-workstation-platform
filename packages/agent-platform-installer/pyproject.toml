@@ -1,0 +1,13 @@
+[project]
+name = "agent-platform-installer"
+version = "0.0.0"
+description = "Placeholder — customer installer (C8). See backlog task 8.x."
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_platform_installer"]

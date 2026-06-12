@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Qoder agent plugin — PLACEHOLDER, FROZEN.
+#
+# Status: frozen pending Alibaba BD confirmation of:
+#   1. Qoder's headless Linux CLI availability + format
+#   2. commercial license terms + air-gap support
+#   3. mandatory telemetry / activation requirements
+#
+# See: docs/architecture/07-open-questions.md OQ-2 (Qoder BD verification)
+#      docs/architecture/02-vm-lifecycle.md decision 2 (採用 D = plugin model)
+#      docs/plans/2026-05-17-feature-and-task-backlog.md (qcoder freeze callout)
+#
+# Once unfrozen: copy goose.sh as a template; the same install/configure/start/
+# healthcheck contract applies. Likely shape (subject to BD answers):
+#   - plugin_install:    download Qoder CLI from AGENT_REGISTRY_URL or apt repo
+#   - plugin_configure:  write /etc/agent-platform/qoder.env (need to confirm Qoder
+#                        accepts OPENAI_BASE_URL override for the gateway)
+#   - plugin_start:      systemd --user unit (assumes headless CLI works)
+#   - plugin_healthcheck: probe whatever health endpoint Qoder exposes
+
+echo "[qoder-plugin] PLACEHOLDER — Qoder integration frozen pending BD confirmation" >&2
+exit 1

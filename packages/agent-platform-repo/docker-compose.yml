@@ -1,0 +1,36 @@
+# Agent Platform C4 — devpi-server (private PyPI) local dev compose.
+#
+# Brings up devpi-server + devpi-web on 127.0.0.1:3141. The server is bound
+# to localhost only so this file is safe to use on a laptop; the prod
+# deployment is handled by the Packer image / installer (C3 / C8) and
+# fronted by Caddy with TLS (task 1.8.1).
+#
+# First-time bootstrap (run once after `docker compose up -d`):
+#   docker compose exec devpi devpi-init
+#   docker compose exec devpi devpi user -m root password=<set-me-via-env>
+#   agent-platform-repo init    # creates the root/agent-platform index
+#
+# DEVPI_ROOT_PASSWORD is read from the host shell env; never commit a value.
+
+services:
+  devpi:
+    # SEC-10: pin by digest, not the floating :latest tag — a private-PyPI
+    # server is supply-chain critical, so the bytes must be reproducible and not
+    # silently swapped on the next `pull`. To bump: `docker manifest inspect
+    # muccg/devpi:latest` and update the digest below.
+    image: muccg/devpi@sha256:ea9168e1bfa8a68e770d8f24cf7d186f22f7f2b721ccb71e78e3b794ca0c0905
+    container_name: agent-platform-devpi
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3141:3141"
+    environment:
+      DEVPI_SERVERDIR: /data/server
+      DEVPI_CLIENTDIR: /data/client
+      DEVPI_ROOT_PASSWORD: ${DEVPI_ROOT_PASSWORD:?DEVPI_ROOT_PASSWORD must be set in the host env}
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3141/+api"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

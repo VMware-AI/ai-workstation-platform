@@ -1,0 +1,233 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Tenant {
+  id               String          @id @default(cuid())
+  name             String
+  slug             String          @unique
+  plan             String          @default("free")
+  quotaInstances   Int             @default(5)
+  quotaTokensMonth BigInt          @default(1000000)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  memberships      Membership[]
+  modelProviders   ModelProvider[]
+  instances        Instance[]
+  computePools     ComputePool[]
+  usageRecords     UsageRecord[]
+  billingRecords   BillingRecord[]
+}
+
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  name         String?
+  passwordHash String
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  memberships  Membership[]
+  sessions     Session[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  // sha256 hex digest of the opaque session token; the plain token only
+  // ever lives in the user's `session` cookie. Storing the hash means a
+  // database read-only leak cannot be replayed as a valid session.
+  tokenHash String   @unique
+  // Tenant this session is bound to (the one chosen at login). Resolves the
+  // active membership instead of silently falling back to memberships[0],
+  // so multi-tenant users get the tenant they authenticated into (#91 H2).
+  tenantId  String
+  expiresAt DateTime
+  // Sliding idle window (#90 M1): bumped at most hourly on use; sessions
+  // idle for >24h are rejected even inside the 7-day absolute lifetime.
+  lastSeenAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Membership {
+  id        String   @id @default(cuid())
+  userId    String
+  tenantId  String
+  role      Role     @default(MEMBER)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tenantId])
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model ModelProvider {
+  id              String       @id @default(cuid())
+  tenantId        String
+  name            String
+  type            ProviderType
+  endpoint        String?
+  apiKeyEncrypted String
+  defaultModel    String
+  enabled         Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+enum ProviderType {
+  openai
+  anthropic
+  azure
+  deepseek
+  qwen
+  ollama
+  custom
+}
+
+
+model Instance {
+  id                   String          @id @default(cuid())
+  tenantId             String
+  computePoolId        String?
+  name                 String
+  status               InstanceStatus  @default(PENDING)
+  containerId          String?
+  vmRefId              String?
+  ipAddress            String?
+  endpoint             String?
+  agentTokenHash       String?
+  agentTokenExpiresAt  DateTime?
+  provisionerJobId     String?
+  errorMessage         String?         @db.Text
+  resourceLimits       Json            @default("{}")
+  // Native vSphere deploy form (doc 33 §6): VC template name, placement, and
+  // cloud-init inputs. osPassword / llmApiKey are stored encrypted (crypto.ts).
+  deployParams         Json?
+  startedAt            DateTime?
+  stoppedAt            DateTime?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  tenant               Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  computePool          ComputePool?    @relation(fields: [computePoolId], references: [id])
+  usageRecords         UsageRecord[]
+  logs                 LogEntry[]
+  metrics              Metric[]
+  provisionEvents      ProvisionEvent[]
+
+  @@index([tenantId])
+  @@index([status])
+}
+
+enum InstanceStatus {
+  PENDING
+  PROVISIONING
+  INITIALIZING
+  RUNNING
+  STOPPING
+  STOPPED
+  ERROR
+  DELETED
+}
+
+model ComputePool {
+  id        String      @id @default(cuid())
+  tenantId  String
+  name      String
+  type      PoolType
+  config    Json        @default("{}")
+  enabled   Boolean     @default(true)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  tenant    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  instances Instance[]
+
+  @@index([tenantId])
+}
+
+enum PoolType {
+  docker
+  vsphere
+}
+
+model ProvisionEvent {
+  id         String   @id @default(cuid())
+  instanceId String
+  event      String
+  message    String   @db.Text
+  metadata   Json     @default("{}")
+  createdAt  DateTime @default(now())
+  instance   Instance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([instanceId, createdAt])
+}
+
+model UsageRecord {
+  id               String   @id @default(cuid())
+  tenantId         String
+  instanceId       String
+  timestamp        DateTime @default(now())
+  promptTokens     Int      @default(0)
+  completionTokens Int      @default(0)
+  totalTokens      Int      @default(0)
+  durationMs       Int      @default(0)
+  costCents        Float    @default(0)
+  model            String
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  instance         Instance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, timestamp])
+  @@index([instanceId, timestamp])
+}
+
+model BillingRecord {
+  id             String   @id @default(cuid())
+  tenantId       String
+  periodStart    DateTime
+  periodEnd      DateTime
+  totalTokens    BigInt   @default(0)
+  totalCostCents Float    @default(0)
+  breakdown      Json     @default("{}")
+  status         String   @default("DRAFT")
+  createdAt      DateTime @default(now())
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, periodStart])
+}
+
+model LogEntry {
+  id         String   @id @default(cuid())
+  instanceId String
+  timestamp  DateTime @default(now())
+  level      String   @default("info")
+  message    String   @db.Text
+  metadata   Json     @default("{}")
+  instance   Instance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([instanceId, timestamp])
+}
+
+model Metric {
+  id           String   @id @default(cuid())
+  instanceId   String
+  timestamp    DateTime @default(now())
+  cpuPercent   Float    @default(0)
+  memoryMb     Float    @default(0)
+  requestCount Int      @default(0)
+  errorCount   Int      @default(0)
+  instance     Instance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([instanceId, timestamp])
+}

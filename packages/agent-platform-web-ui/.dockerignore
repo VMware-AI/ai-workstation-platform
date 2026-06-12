@@ -1,0 +1,7 @@
+# Keep the docker build context lean (PR #232 review M-2): the Dockerfiles
+# COPY selectively, but compose still ships the whole directory to the daemon.
+node_modules
+.next
+dist
+.env*
+dump.rdb

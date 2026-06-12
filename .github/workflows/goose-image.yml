@@ -1,0 +1,129 @@
+name: goose-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      goose_version:
+        description: "Goose release tag to package (e.g. v1.34.1)"
+        required: true
+        default: "v1.34.1"
+      push:
+        description: "Push image to GHCR after build"
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - "packages/agent-platform-image/agents/goose/**"
+      - ".github/workflows/goose-image.yml"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/goose
+  DEFAULT_GOOSE_VERSION: v1.34.1
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve goose version
+        id: ver
+        # Untrusted workflow_dispatch input reaches the shell via env (not
+        # `${{ }}` template interpolation, which would allow command injection
+        # in a job holding packages:write) and must match a strict version
+        # shape before it is used anywhere.
+        env:
+          GOOSE_VERSION_INPUT: ${{ inputs.goose_version }}
+        run: |
+          if [[ -n "$GOOSE_VERSION_INPUT" ]]; then
+            v="$GOOSE_VERSION_INPUT"
+          else
+            v="${DEFAULT_GOOSE_VERSION}"
+          fi
+          if [[ ! "$v" =~ ^v[0-9][0-9a-zA-Z.+-]*$ ]]; then
+            echo "::error::invalid goose_version '${v}' — must match ^v[0-9][0-9a-zA-Z.+-]*$" >&2
+            exit 1
+          fi
+          echo "goose_version=${v}" >> "$GITHUB_OUTPUT"
+          echo "image_version=${v#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Login to GHCR
+        if: ${{ github.event_name != 'pull_request' && (inputs.push != false) }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.ver.outputs.image_version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+
+      # Smoke test runs UNCONDITIONALLY before push so a broken image never
+      # reaches GHCR. Builds locally for linux/amd64 only (--load), exercises
+      # entrypoint env validation + goose binary.
+      - name: Smoke test (linux/amd64)
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --build-arg GOOSE_VERSION=${{ steps.ver.outputs.goose_version }} \
+            -t goose:smoke \
+            packages/agent-platform-image/agents/goose
+
+          echo "::group::entrypoint env validation"
+          # No env → must fail with exit 64 + "OPENAI_HOST is required"
+          set +e
+          out=$(docker run --rm goose:smoke 2>&1)
+          rc=$?
+          set -e
+          if [[ $rc -ne 64 ]] || ! grep -q "OPENAI_HOST is required" <<< "$out"; then
+            echo "expected exit=64 + 'OPENAI_HOST is required', got rc=$rc out=$out" >&2
+            exit 1
+          fi
+          echo "OK"
+          echo "::endgroup::"
+
+          echo "::group::goose --version through entrypoint"
+          docker run --rm \
+            -e OPENAI_HOST=http://gateway.test \
+            -e OPENAI_API_KEY=test-token \
+            goose:smoke --version
+          echo "::endgroup::"
+
+      - name: Build (+ push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: packages/agent-platform-image/agents/goose
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' && (inputs.push != false) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GOOSE_VERSION=${{ steps.ver.outputs.goose_version }}
+          # SEC-25: scope the build cache to this image so a cache entry written
+          # from another branch (workflow_dispatch can run anywhere) can't poison
+          # a later trusted build; mode=min also shrinks the writable surface.
+          cache-from: type=gha,scope=goose-image
+          cache-to: type=gha,mode=min,scope=goose-image
+          # Supply-chain hardening: emit SBOM + SLSA provenance attestation
+          # alongside the image. Both attach to the manifest under cosign-style
+          # references and can be inspected with `docker buildx imagetools inspect`.
+          sbom: true
+          provenance: mode=max

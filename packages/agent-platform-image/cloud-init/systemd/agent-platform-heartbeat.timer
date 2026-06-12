@@ -1,0 +1,12 @@
+[Unit]
+Description=Run agent-platform heartbeat every 60s
+Requires=agent-platform-heartbeat.service
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=agent-platform-heartbeat.service
+
+[Install]
+WantedBy=timers.target
