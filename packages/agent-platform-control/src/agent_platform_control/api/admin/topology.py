@@ -10,12 +10,11 @@ echarts ``graph`` series without a transform layer.
 
 from __future__ import annotations
 
-import os
-
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...config import get_settings_fresh
 from ...db.models import VM
 from ...db.session import get_session
 
@@ -29,11 +28,7 @@ def _vcenter_node_name() -> str:
     ``"vcenter:unconfigured"`` so the chart still renders a center even
     on a fresh dev DB. The string is the node ``id``, not a display label.
     """
-    host = (
-        os.environ.get("AGENT_PLATFORM_VCENTER_HOST")
-        or os.environ.get("AGENT_PLATFORM_VSPHERE_HOST")
-        or os.environ.get("AGENT_PLATFORM_VSPHERE_URL")
-    )
+    host = get_settings_fresh().vsphere_url
     return "vcenter:default" if host else "vcenter:unconfigured"
 
 
@@ -53,12 +48,7 @@ async def vms_topology(session: AsyncSession = Depends(get_session)) -> dict:
     vCenter means every VM connects to the same center.
     """
     vcenter_id = _vcenter_node_name()
-    vcenter_label = (
-        os.environ.get("AGENT_PLATFORM_VCENTER_HOST")
-        or os.environ.get("AGENT_PLATFORM_VSPHERE_HOST")
-        or os.environ.get("AGENT_PLATFORM_VSPHERE_URL")
-        or "unconfigured"
-    )
+    vcenter_label = get_settings_fresh().vsphere_url or "unconfigured"
 
     vms = (await session.execute(select(VM))).scalars().all()
 

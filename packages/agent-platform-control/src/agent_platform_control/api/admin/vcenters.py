@@ -1,8 +1,9 @@
 """/admin/vcenters/* — read-only vCenter inventory surface.
 
-M1 supports a single vCenter sourced from ``AGENT_PLATFORM_VCENTER_*`` env vars
-(per docs/architecture/21 §4 revision). Multi-vCenter config.yaml lands
-in M2.
+M1 supports a single vCenter sourced from ``Settings.vsphere_*``
+(``AGENT_PLATFORM_VSPHERE_URL/USER/PASSWORD/...``) — the SAME source the
+provisioner clones against, so a green health probe and a real clone can't
+point at different vCenters. Multi-vCenter config.yaml lands in M2.
 
 R-2 locked the endpoint shapes; R-3 (this revision) replaces deferred
 bodies with real ``vmware_aiops.ops.inventory`` calls. Inventory list
@@ -17,14 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from typing import Any
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, status
 
-from ...orchestrator.vmware import _connect, _Target
+from ...config import get_settings_fresh
+from ...orchestrator.vmware import VCenterTarget, build_vcenter_target, connect
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -35,34 +35,21 @@ _CACHE_TTL_S = 300.0
 _INVENTORY_CACHE: dict[str, tuple[float, dict]] = {}
 
 
-def _single_target() -> _Target | None:
-    """Build a ``_Target`` from env. ``None`` if vCenter not configured."""
-    host_raw = (
-        os.environ.get("AGENT_PLATFORM_VCENTER_HOST")
-        or os.environ.get("AGENT_PLATFORM_VSPHERE_HOST")
-        or os.environ.get("AGENT_PLATFORM_VSPHERE_URL")
-    )
-    user = os.environ.get("AGENT_PLATFORM_VCENTER_USER") or os.environ.get(
-        "AGENT_PLATFORM_VSPHERE_USER"
-    )
-    password = os.environ.get("AGENT_PLATFORM_VCENTER_PASSWORD") or os.environ.get(
-        "AGENT_PLATFORM_VSPHERE_PASSWORD"
-    )
-    if not host_raw:
+def _single_target() -> VCenterTarget | None:
+    """Build the vCenter target from ``Settings.vsphere_*`` — the same source
+    the provisioner uses. ``None`` if vCenter is not configured."""
+    settings = get_settings_fresh()
+    if not settings.vsphere_url:
         return None
-
-    # Accept either bare host or full URL.
-    parsed = urlparse(host_raw if "://" in host_raw else f"https://{host_raw}")
-    host = parsed.hostname or host_raw
-    port = parsed.port or 443
-    verify_ssl = os.environ.get("AGENT_PLATFORM_VCENTER_VERIFY_SSL", "true").lower() not in {
-        "0",
-        "false",
-        "no",
-    }
-    return _Target(
-        host=host, port=port, user=user or "", password=password or "", verify_ssl=verify_ssl
-    )
+    try:
+        return build_vcenter_target(
+            settings.vsphere_url,
+            settings.vsphere_user,
+            settings.vsphere_password,
+            settings.vsphere_verify_ssl,
+        )
+    except ValueError:
+        return None
 
 
 def _vc_descriptor() -> dict | None:
@@ -88,14 +75,14 @@ async def list_vcenters() -> dict:
     return {"vcenters": [vc] if vc else [], "_single_only": True}
 
 
-def _ping_sync(target: _Target) -> dict:
+def _ping_sync(target: VCenterTarget) -> dict:
     """Synchronously open (cached) SI + call RetrieveContent as a smoke test.
 
     Bypasses the per-target circuit breaker (H-14): this endpoint is the
     operator's diagnostic tool — it must show live vCenter state even while
     the provisioning breaker is open, and its failures must not count
     toward tripping it."""
-    si = _connect(target, bypass_breaker=True)
+    si = connect(target, bypass_breaker=True)
     content = si.RetrieveContent()
     return {
         "status": "ok",
@@ -127,7 +114,7 @@ async def vcenter_health(name: str) -> dict:
         return {"name": name, "host": target.host, "status": "error", "error": str(exc)}
 
 
-def _inventory_sync(target: _Target) -> dict[str, list[dict]]:
+def _inventory_sync(target: VCenterTarget) -> dict[str, list[dict]]:
     """Pull lists synchronously via vmware-aiops ops layer."""
     # Import lazily so a missing vmware-aiops install fails on call, not on import.
     from vmware_aiops.ops.inventory import (
@@ -137,7 +124,7 @@ def _inventory_sync(target: _Target) -> dict[str, list[dict]]:
         list_networks,
     )
 
-    si = _connect(target)
+    si = connect(target)
     return {
         "hosts": list_hosts(si),
         "clusters": list_clusters(si),
@@ -194,11 +181,11 @@ async def vcenter_inventory(name: str, refresh: bool = False) -> dict:
     return {"name": name, "cached": False, "ttl_s": _CACHE_TTL_S, **body}
 
 
-def _templates_sync(target: _Target) -> list[dict]:
+def _templates_sync(target: VCenterTarget) -> list[dict]:
     """Return template-flagged VMs via vmware-aiops list_vms."""
     from vmware_aiops.ops.inventory import list_vms
 
-    si = _connect(target)
+    si = connect(target)
     # ``list_vms`` returns ``{"vms": [...], "next_offset": ...}`` when compact;
     # we want raw rows for filtering.
     raw = list_vms(si, limit=None)

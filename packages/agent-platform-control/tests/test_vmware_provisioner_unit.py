@@ -165,7 +165,7 @@ def test_build_extra_config_emits_guestinfo_pairs():
 def test_init_rejects_bad_url(tmp_path):
     tpl = tmp_path / "u.yaml"
     tpl.write_text("#cloud-config")
-    with pytest.raises(ValueError, match="invalid vcenter_url"):
+    with pytest.raises(ValueError, match="invalid vcenter url"):
         VmwareProvisioner(
             vcenter_url="://not-a-url",
             vcenter_user="u",
