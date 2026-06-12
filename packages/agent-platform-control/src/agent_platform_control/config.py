@@ -173,3 +173,10 @@ def get_settings() -> Settings:
     from .secrets_bootstrap import resolve_secret_settings
 
     return resolve_secret_settings(Settings())
+
+
+def get_settings_fresh() -> Settings:
+    """Re-read settings uncached so .env edits / runtime env changes are picked
+    up. The single ``vsphere_*`` source of truth shared by the provisioner
+    (runtime) and the admin diagnostic endpoints."""
+    return Settings()

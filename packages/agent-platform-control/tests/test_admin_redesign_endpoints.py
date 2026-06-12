@@ -110,10 +110,10 @@ async def test_overview_tokens_today_includes_midnight_row(client, engine):
 @pytest.mark.asyncio
 async def test_vcenters_empty_when_no_env(client, monkeypatch):
     for var in (
-        "AGENT_PLATFORM_VCENTER_HOST",
+        "AGENT_PLATFORM_VSPHERE_URL",
         "AGENT_PLATFORM_VSPHERE_HOST",
         "AGENT_PLATFORM_VSPHERE_URL",
-        "AGENT_PLATFORM_VCENTER_USER",
+        "AGENT_PLATFORM_VSPHERE_USER",
         "AGENT_PLATFORM_VSPHERE_USER",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -125,8 +125,8 @@ async def test_vcenters_empty_when_no_env(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_vcenters_lists_single_target_from_env(client, monkeypatch):
-    monkeypatch.setenv("AGENT_PLATFORM_VCENTER_HOST", "vcsa-01.example.com")
-    monkeypatch.setenv("AGENT_PLATFORM_VCENTER_USER", "svc-agent-platform@vsphere.local")
+    monkeypatch.setenv("AGENT_PLATFORM_VSPHERE_URL", "vcsa-01.example.com")
+    monkeypatch.setenv("AGENT_PLATFORM_VSPHERE_USER", "svc-agent-platform@vsphere.local")
     r = await client.get("/admin/vcenters", headers=AUTH)
     assert r.status_code == 200
     body = r.json()
@@ -140,7 +140,7 @@ async def test_vcenters_lists_single_target_from_env(client, monkeypatch):
 @pytest.mark.asyncio
 async def test_vcenter_inventory_502_when_unreachable(client, monkeypatch):
     """R-3: real pyVmomi call now. Unreachable host yields a structured 502."""
-    monkeypatch.setenv("AGENT_PLATFORM_VCENTER_HOST", "definitely-not-a-real-host.invalid")
+    monkeypatch.setenv("AGENT_PLATFORM_VSPHERE_URL", "definitely-not-a-real-host.invalid")
     r = await client.get("/admin/vcenters/default/inventory", headers=AUTH)
     assert r.status_code == 502
     assert "vCenter inventory error" in r.json()["detail"]
@@ -151,7 +151,7 @@ async def test_vcenter_inventory_happy_path_mocked(client, monkeypatch):
     """R-3: with _inventory_sync mocked, the endpoint returns aggregated lists + counts."""
     from agent_platform_control.api.admin import vcenters as vc_mod
 
-    monkeypatch.setenv("AGENT_PLATFORM_VCENTER_HOST", "vcsa-01.example.com")
+    monkeypatch.setenv("AGENT_PLATFORM_VSPHERE_URL", "vcsa-01.example.com")
 
     def fake_inventory_sync(_target):
         return {
@@ -179,7 +179,7 @@ async def test_vcenter_inventory_happy_path_mocked(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_vcenter_404_for_unknown_name(client, monkeypatch):
-    monkeypatch.setenv("AGENT_PLATFORM_VCENTER_HOST", "vcsa-01.example.com")
+    monkeypatch.setenv("AGENT_PLATFORM_VSPHERE_URL", "vcsa-01.example.com")
     r = await client.get("/admin/vcenters/other/health", headers=AUTH)
     assert r.status_code == 404
     assert "not configured" in r.json()["detail"]

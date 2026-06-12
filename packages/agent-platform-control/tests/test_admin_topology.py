@@ -52,7 +52,7 @@ async def seeded_vms(engine):
 @pytest.mark.asyncio
 async def test_topology_empty_db_unconfigured_vcenter(client, monkeypatch):
     for var in (
-        "AGENT_PLATFORM_VCENTER_HOST",
+        "AGENT_PLATFORM_VSPHERE_URL",
         "AGENT_PLATFORM_VSPHERE_HOST",
         "AGENT_PLATFORM_VSPHERE_URL",
     ):
@@ -71,7 +71,7 @@ async def test_topology_empty_db_unconfigured_vcenter(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_topology_with_env_vcenter_and_vms(client, monkeypatch, seeded_vms):
-    monkeypatch.setenv("AGENT_PLATFORM_VCENTER_HOST", "vcsa-01.example.com")
+    monkeypatch.setenv("AGENT_PLATFORM_VSPHERE_URL", "vcsa-01.example.com")
     r = await client.get("/admin/vms/topology", headers=ADMIN)
     assert r.status_code == 200
     body = r.json()

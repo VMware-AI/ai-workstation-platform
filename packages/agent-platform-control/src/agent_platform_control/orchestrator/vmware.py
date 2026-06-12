@@ -108,6 +108,39 @@ class _Target:
     verify_ssl: bool
 
 
+# Public alias so callers outside this module (the admin diagnostic endpoints)
+# don't reach for the underscore-private name.
+VCenterTarget = _Target
+
+
+def build_vcenter_target(url: str, user: str, password: str, verify_ssl: bool) -> _Target:
+    """Parse a vCenter URL/host into a :class:`_Target`.
+
+    The single construction path shared by :class:`VmwareProvisioner` and the
+    admin diagnostic endpoints, so a green health probe and a real clone always
+    resolve to the same vCenter (no VCENTER_* vs VSPHERE_* drift).
+    """
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    if not parsed.hostname:
+        raise ValueError(f"invalid vcenter url: {url}")
+    return _Target(
+        host=parsed.hostname,
+        port=parsed.port or 443,
+        user=user,
+        password=password,
+        verify_ssl=verify_ssl,
+    )
+
+
+def connect(target: _Target, *, bypass_breaker: bool = False):
+    """Public entry point for opening a vCenter ServiceInstance from a target.
+
+    Thin wrapper over the internal connector so admin endpoints depend on a
+    public name rather than the underscore-private one.
+    """
+    return _connect(target, bypass_breaker=bypass_breaker)
+
+
 def _connect(target: _Target, *, bypass_breaker: bool = False):
     """Return a cached or fresh ServiceInstance for target.
 
@@ -403,16 +436,7 @@ class VmwareProvisioner(Provisioner):
         verify_ssl: bool = True,
         clone_timeout_s: float = 600.0,
     ) -> None:
-        parsed = urlparse(vcenter_url if "://" in vcenter_url else f"https://{vcenter_url}")
-        if not parsed.hostname:
-            raise ValueError(f"invalid vcenter_url: {vcenter_url}")
-        self._target = _Target(
-            host=parsed.hostname,
-            port=parsed.port or 443,
-            user=vcenter_user,
-            password=vcenter_password,
-            verify_ssl=verify_ssl,
-        )
+        self._target = build_vcenter_target(vcenter_url, vcenter_user, vcenter_password, verify_ssl)
         self._template_path = Path(cloud_init_template_path)
         if not self._template_path.is_file():
             raise FileNotFoundError(f"cloud-init template not found: {self._template_path}")

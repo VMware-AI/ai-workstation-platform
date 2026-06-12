@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .config import Settings
+from .config import Settings, get_settings_fresh
 from .db.session import get_engine
 from .orchestrator import DeploymentWorker
 from .orchestrator.cleanup_cron import HeartbeatSweeper
@@ -96,13 +96,6 @@ def _build_vmware_provisioner() -> Provisioner:
             "Set AGENT_PLATFORM_VSPHERE_TEMPLATE to a real cloud-init YAML "
             "(e.g. docs/runbooks/cloud-init-bare-ubuntu.yaml in this repo)."
         ) from exc
-
-
-def get_settings_fresh() -> Settings:
-    """Re-read settings without lru_cache so .env edits during dev pick up."""
-    from .config import Settings as _Settings
-
-    return _Settings()
 
 
 def _build_worker(settings: Settings) -> DeploymentWorker:
