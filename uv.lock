@@ -140,7 +140,7 @@ requires-dist = [
     { name = "pyvmomi", specifier = ">=8.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-    { name = "vmware-aiops", specifier = ">=1.5" },
+    { name = "vmware-aiops", specifier = ">=1.5.37" },
 ]
 provides-extras = ["dev"]
 
@@ -3563,7 +3563,7 @@ wheels = [
 
 [[package]]
 name = "vmware-aiops"
-version = "1.5.29"
+version = "1.5.37"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apscheduler" },
@@ -3576,9 +3576,9 @@ dependencies = [
     { name = "typer" },
     { name = "vmware-policy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7e/84/fd3839b47d18ab09cfeed4ed000b630327ae9b81aa2ec9541c899e5bc08b/vmware_aiops-1.5.29.tar.gz", hash = "sha256:7e04166586b7f348ab88d4b41bfb30fbecd779dcb1a21bdeb772dcf5ad54a4f8", size = 219101, upload-time = "2026-05-29T02:16:37.685Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a9/2d/b24cd168028d19aacd1f35a298089381004f8061c012c948204241b17c11/vmware_aiops-1.5.37.tar.gz", hash = "sha256:b1c4446b43a9efcb864db1d425a432077dadc011709ddb9cc7f9f205b3cf99ec", size = 251786, upload-time = "2026-06-12T01:56:57.301Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/47/84/b23832a33d62c51ee5f47ae548bd4de3061aa170d86a2d8d7ef7999b394b/vmware_aiops-1.5.29-py3-none-any.whl", hash = "sha256:a06acd1bd0bf800c1f271caa13fefa974db4c2dad2d855f0d5be83351d44dbaf", size = 97456, upload-time = "2026-05-29T02:16:36.275Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/49/794b85bde7eb27dafaed81d682c22f80267040d316b819e42f44e6350b1c/vmware_aiops-1.5.37-py3-none-any.whl", hash = "sha256:278456021b77d9fe3dcec7faba8982b12168398c20a92c4ad9d32deb40fe0732", size = 106237, upload-time = "2026-06-12T01:56:55.476Z" },
 ]
 
 [[package]]
