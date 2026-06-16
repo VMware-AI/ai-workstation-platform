@@ -163,7 +163,8 @@ def _write_good_config(tmp_path) -> str:
             "master_key": "sk-very-real-secret-token-xxxxxxxxxxxxxxxxxxxx",
             "database_url": "postgresql://agent-platform@localhost/agent_platform_gateway",
         },
-        "litellm_settings": {"rpm": 100, "tpm": 50_000},
+        # rpm/tpm under litellm_settings are silently ignored by LiteLLM (#351).
+        "litellm_settings": {"success_callback": ["postgres"]},
     }
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(cfg))
