@@ -5,6 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# install.env carries AGENT_RUNTIME_ENV=/etc/agent-platform/<AGENT_KIND>.env
+# (and AGENT_HEARTBEAT_SERVICE if set). Without this the script falls back to
+# the goose defaults, so a non-goose agent sources the wrong runtime env and
+# reports no GOOSE_MODE/HEARTBEAT_URL. The leading '-' makes it non-fatal if
+# the file is absent (heartbeat must never fail the timer).
+EnvironmentFile=-/etc/agent-platform/install.env
 ExecStart=/usr/local/bin/agent-platform-heartbeat
 NoNewPrivileges=true
 ProtectSystem=strict

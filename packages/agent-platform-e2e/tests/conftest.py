@@ -72,9 +72,11 @@ def created_deployments(agent_platform_env: AgentPlatformEnv) -> Iterator[list[s
 
     Tests that POST /v1/deployments (step02) append the returned id here so the
     teardown can reclaim them — otherwise staging accretes orphan VMs on every
-    run. Cleanup is best-effort: a 404 (already gone) is tolerated, and any
-    transport error is logged rather than failing the session, because a flaky
-    teardown must not mask the test result.
+    run. Reclamation is via POST /{id}/cancel (C1 exposes no DELETE route);
+    cancel marks pending items cancelled so the cleanup cron destroys their VMs.
+    Cleanup is best-effort: a 404 (already gone) is tolerated, and any transport
+    error is logged rather than failing the session, because a flaky teardown
+    must not mask the test result.
     """
     ids: list[str] = []
     yield ids
@@ -86,15 +88,15 @@ def created_deployments(agent_platform_env: AgentPlatformEnv) -> Iterator[list[s
     ) as client:
         for deployment_id in ids:
             try:
-                resp = client.delete(f"/v1/deployments/{deployment_id}", headers=headers)
+                resp = client.post(f"/v1/deployments/{deployment_id}/cancel", headers=headers)
                 if resp.status_code not in (200, 202, 204, 404):
                     logging.warning(
-                        "e2e cleanup: DELETE deployment %s returned HTTP %s",
+                        "e2e cleanup: cancel deployment %s returned HTTP %s",
                         deployment_id,
                         resp.status_code,
                     )
             except httpx.HTTPError as exc:  # pragma: no cover — network-dependent
-                logging.warning("e2e cleanup: DELETE deployment %s failed: %s", deployment_id, exc)
+                logging.warning("e2e cleanup: cancel deployment %s failed: %s", deployment_id, exc)
 
 
 @pytest_asyncio.fixture
