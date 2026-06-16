@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..db.models import Deployment, DeploymentItem
 from .audit import record_audit, sanitize
@@ -55,8 +55,35 @@ async def find_deployment_for_approval(
     return (await session.execute(stmt)).scalars().first()
 
 
+async def _audit_redeploy_destroy(
+    sm: async_sessionmaker[AsyncSession],
+    item_id: int,
+    vm_id: str,
+    approval_request_id: int,
+    *,
+    result: str,
+    error: Exception | None = None,
+) -> None:
+    """Own short txn: record one ``vm.destroy`` audit row (harness #H-6)."""
+    params: dict[str, Any] = {
+        "deployment_item_id": item_id,
+        "approval_request_id": approval_request_id,
+    }
+    if error is not None:
+        params["error"] = sanitize(str(error))
+    async with sm() as session, session.begin():
+        record_audit(
+            session,
+            actor="approval:redeploy",
+            operation="vm.destroy",
+            resource=vm_id,
+            params=params,
+            result=result,
+        )
+
+
 async def revoke_deployment_for_approval(
-    session: AsyncSession,
+    sm: async_sessionmaker[AsyncSession],
     provisioner: Provisioner,
     approval_request_id: int,
     *,
@@ -67,59 +94,62 @@ async def revoke_deployment_for_approval(
     Steps (idempotent, best-effort per item):
 
     1. Find the existing deployment via the approval_request_id reverse link
-    2. For every item with a bound vm_id: ``provisioner.destroy_vm``
-    3. For every item: if ``secret_store`` is provided, call
+    2. Mark the deployment + every item ``cancelled`` and free the approval slot
+    3. For every item with a bound vm_id: ``provisioner.destroy_vm``
+    4. For every item: if ``secret_store`` is provided, call
        ``revoke_per_vm_secrets`` (PR-C helper, dynamically imported to
        avoid a circular import when this module is reused without C18)
-    4. Mark deployment state ``cancelled``
 
-    Returns True if a deployment was revoked, False if none existed. Caller
-    should commit the session.
+    Returns True if a deployment was revoked, False if none existed.
+
+    AC1 (#353): the destroy IO runs with **no DB transaction held**. Phase 1 (a
+    single short txn) marks everything cancelled and commits; phase 2 destroys
+    each VM untransacted and audits each outcome in its own short txn. The old
+    version held the caller's (HTTP request) write txn open across every destroy.
 
     Failures on a single VM (vCenter blip, missing pyVmomi) are logged and
-    skipped — the deployment is still marked cancelled, so the operator's
-    retry isn't blocked. The cleanup cron (decision 5) will sweep the
-    leftover failed item on a later pass.
+    skipped — the deployment is already marked cancelled, so the operator's
+    retry isn't blocked. The cleanup cron (decision 5) will sweep the leftover
+    VM on a later pass.
     """
-    existing = await find_deployment_for_approval(session, approval_request_id)
-    if existing is None:
-        return False
+    # Phase 1: cancel + snapshot the destroy targets, then commit — releasing
+    # the connection before any slow vCenter IO.
+    async with sm() as session, session.begin():
+        existing = await find_deployment_for_approval(session, approval_request_id)
+        if existing is None:
+            return False
 
-    items_stmt = select(DeploymentItem).where(DeploymentItem.deployment_id == existing.id)
-    items = (await session.execute(items_stmt)).scalars().all()
+        items_stmt = select(DeploymentItem).where(DeploymentItem.deployment_id == existing.id)
+        items = (await session.execute(items_stmt)).scalars().all()
+        targets: list[tuple[int, str | None]] = [(item.id, item.vm_id) for item in items]
 
-    for item in items:
-        if item.vm_id is not None:
+        now = _utcnow()
+        for item in items:
+            item.state = "cancelled"
+            item.updated_at = now
+        existing.state = "cancelled"
+        existing.updated_at = now
+        # Release the UNIQUE approval slot so this approval can be re-provisioned
+        # (PR-review I1); the audit link stays in `extra`.
+        existing.approval_request_id = None
+        dep_id = existing.id
+
+    # Phase 2: destroy each bound VM with no txn held; audit + revoke secrets.
+    for item_id, vm_id in targets:
+        if vm_id is not None:
             try:
-                await provisioner.destroy_vm(item.vm_id)
-                record_audit(
-                    session,
-                    actor="approval:redeploy",
-                    operation="vm.destroy",
-                    resource=item.vm_id,
-                    params={
-                        "deployment_item_id": item.id,
-                        "approval_request_id": approval_request_id,
-                    },
-                    result="success",
+                await provisioner.destroy_vm(vm_id)
+                await _audit_redeploy_destroy(
+                    sm, item_id, vm_id, approval_request_id, result="success"
                 )
             except Exception as exc:
                 logger.exception(
                     "redeploy: destroy_vm failed for item %s vm_id=%s; leaving for cleanup cron",
-                    item.id,
-                    item.vm_id,
+                    item_id,
+                    vm_id,
                 )
-                record_audit(
-                    session,
-                    actor="approval:redeploy",
-                    operation="vm.destroy",
-                    resource=item.vm_id,
-                    params={
-                        "deployment_item_id": item.id,
-                        "approval_request_id": approval_request_id,
-                        "error": sanitize(str(exc)),
-                    },
-                    result="failure",
+                await _audit_redeploy_destroy(
+                    sm, item_id, vm_id, approval_request_id, result="failure", error=exc
                 )
 
         if secret_store is not None:
@@ -128,26 +158,17 @@ async def revoke_deployment_for_approval(
             try:
                 from .secret_provisioner import revoke_per_vm_secrets
 
-                await revoke_per_vm_secrets(secret_store, deployment_item_id=item.id)
+                await revoke_per_vm_secrets(secret_store, deployment_item_id=item_id)
             except Exception:
                 logger.exception(
                     "redeploy: per-VM secret revoke failed for item %s; continuing",
-                    item.id,
+                    item_id,
                 )
-
-        item.state = "cancelled"
-        item.updated_at = _utcnow()
-
-    existing.state = "cancelled"
-    existing.updated_at = _utcnow()
-    # Release the UNIQUE approval slot so this approval can be re-provisioned
-    # (PR-review I1); the audit link stays in `extra`.
-    existing.approval_request_id = None
 
     logger.info(
         "redeploy: revoked deployment %s (approval %s) with %s items",
-        existing.id,
+        dep_id,
         approval_request_id,
-        len(items),
+        len(targets),
     )
     return True

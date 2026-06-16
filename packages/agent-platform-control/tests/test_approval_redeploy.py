@@ -138,8 +138,7 @@ async def test_find_returns_linked_deployment(seeded):
 async def test_revoke_returns_false_when_no_match(seeded):
     sm = seeded
     fake = FakeProvisioner()
-    async with sm() as s, s.begin():
-        revoked = await revoke_deployment_for_approval(s, fake, approval_request_id=99)
+    revoked = await revoke_deployment_for_approval(sm, fake, approval_request_id=99)
     assert revoked is False
     assert fake.destroyed == []
 
@@ -148,8 +147,7 @@ async def test_revoke_returns_false_when_no_match(seeded):
 async def test_revoke_destroys_bound_vms_only(seeded):
     sm = seeded
     fake = FakeProvisioner()
-    async with sm() as s, s.begin():
-        revoked = await revoke_deployment_for_approval(s, fake, approval_request_id=7)
+    revoked = await revoke_deployment_for_approval(sm, fake, approval_request_id=7)
     assert revoked is True
     # Only item with vm_id is destroyed; the unbound one is skipped
     assert fake.destroyed == ["vsphere-vm-001"]
@@ -161,8 +159,7 @@ async def test_revoke_records_audit_for_destroy(seeded):
     from agent_platform_control.db.models import AuditView
 
     sm = seeded
-    async with sm() as s, s.begin():
-        await revoke_deployment_for_approval(s, FakeProvisioner(), approval_request_id=7)
+    await revoke_deployment_for_approval(sm, FakeProvisioner(), approval_request_id=7)
     async with sm() as s:
         destroys = [
             r
@@ -179,8 +176,7 @@ async def test_revoke_records_audit_for_destroy(seeded):
 async def test_revoke_marks_deployment_and_items_cancelled(seeded):
     sm = seeded
     fake = FakeProvisioner()
-    async with sm() as s, s.begin():
-        await revoke_deployment_for_approval(s, fake, approval_request_id=7)
+    await revoke_deployment_for_approval(sm, fake, approval_request_id=7)
     async with sm() as s:
         dep = await s.get(Deployment, "dep-linked")
         items = (
@@ -200,8 +196,7 @@ async def test_revoke_marks_deployment_and_items_cancelled(seeded):
 async def test_revoke_doesnt_touch_unlinked_deployment(seeded):
     sm = seeded
     fake = FakeProvisioner()
-    async with sm() as s, s.begin():
-        await revoke_deployment_for_approval(s, fake, approval_request_id=7)
+    await revoke_deployment_for_approval(sm, fake, approval_request_id=7)
     async with sm() as s:
         other = await s.get(Deployment, "dep-other")
     assert other.state == "completed"
@@ -216,11 +211,37 @@ async def test_revoke_with_stub_store_does_not_crash(seeded):
     fake = FakeProvisioner()
     store = _StubStore()
 
-    async with sm() as s, s.begin():
-        revoked = await revoke_deployment_for_approval(
-            s, fake, approval_request_id=7, secret_store=store
-        )
+    revoked = await revoke_deployment_for_approval(
+        sm, fake, approval_request_id=7, secret_store=store
+    )
     assert revoked is True
+
+
+@pytest.mark.asyncio
+async def test_revoke_commits_cancel_before_destroy(seeded):
+    """AC1 (#353): the deployment is marked cancelled and committed BEFORE any
+    destroy IO runs — so the destroy never executes inside an open write txn.
+    Read from a *separate* session mid-destroy, the deployment must already be
+    'cancelled'.
+    """
+    sm = seeded
+    observed: list[str] = []
+
+    class ObservingProvisioner(FakeProvisioner):
+        async def destroy_vm(self, vm_id):
+            async with sm() as s2:
+                dep = await s2.get(Deployment, "dep-linked")
+                observed.append(dep.state)
+            await super().destroy_vm(vm_id)
+
+    revoked = await revoke_deployment_for_approval(
+        sm, ObservingProvisioner(), approval_request_id=7
+    )
+    assert revoked is True
+    assert observed == ["cancelled"], (
+        "deployment not committed-cancelled before destroy — revoke still holds "
+        "a txn open across the destroy IO (AC1 regression)"
+    )
 
 
 @pytest.mark.asyncio
@@ -233,8 +254,7 @@ async def test_revoke_continues_when_destroy_fails(seeded):
 
     sm = seeded
     fake = FlakyProvisioner()
-    async with sm() as s, s.begin():
-        revoked = await revoke_deployment_for_approval(s, fake, approval_request_id=7)
+    revoked = await revoke_deployment_for_approval(sm, fake, approval_request_id=7)
     assert revoked is True
     async with sm() as s:
         dep = await s.get(Deployment, "dep-linked")

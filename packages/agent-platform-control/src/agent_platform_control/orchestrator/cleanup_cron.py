@@ -42,65 +42,62 @@ def _coerce_aware(dt: datetime) -> datetime:
     return dt
 
 
-async def _cleanup_in_session(
-    session: AsyncSession,
-    provisioner: Provisioner,
-    *,
-    retain_hours: int,
-    now: datetime,
-) -> int:
-    """Single pass: destroy retained-failed items, mark cleaned. Caller owns commit."""
+async def _select_cleanup_eligible(
+    sm: async_sessionmaker[AsyncSession], *, retain_hours: int, now: datetime
+) -> list[tuple[int, str]]:
+    """Short read txn: snapshot the ``(item_id, vm_id)`` of every retained-
+    failed item due for cleanup. Releases the connection before any IO."""
     cutoff = now - timedelta(hours=retain_hours)
+    async with sm() as session:
+        stmt = select(DeploymentItem).where(
+            DeploymentItem.state == "failed",
+            DeploymentItem.vm_id.is_not(None),
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        return [(item.id, item.vm_id) for item in rows if _coerce_aware(item.updated_at) < cutoff]
 
-    stmt = select(DeploymentItem).where(
-        DeploymentItem.state == "failed",
-        DeploymentItem.vm_id.is_not(None),
-    )
-    rows = (await session.execute(stmt)).scalars().all()
-    eligible = [item for item in rows if _coerce_aware(item.updated_at) < cutoff]
 
-    cleaned = 0
-    for item in eligible:
-        try:
-            await provisioner.destroy_vm(item.vm_id)
-        except Exception as exc:
-            # Don't let one bad VM block the rest. Log + audit the failure +
-            # skip; next sweep picks it up again.
-            logger.exception(
-                "destroy_vm failed for deployment_item %s vm_id=%s; will retry next sweep",
-                item.id,
-                item.vm_id,
-            )
-            record_audit(
-                session,
-                actor="cron:cleanup",
-                operation="vm.destroy",
-                resource=item.vm_id,
-                params={
-                    "deployment_item_id": item.id,
-                    "reason": "failed-vm-retention",
-                    "error": sanitize(str(exc)),
-                },
-                result="failure",
-            )
-            continue
-
+async def _record_cleanup_success(
+    sm: async_sessionmaker[AsyncSession], item_id: int, vm_id: str, *, now: datetime
+) -> bool:
+    """Own short txn: flip the item to ``cleaned`` + audit the destroy. Returns
+    ``False`` (without auditing) if the item raced away from ``failed``."""
+    async with sm() as session, session.begin():
+        item = await session.get(DeploymentItem, item_id)
+        if item is None or item.state != "failed":
+            return False
         item.state = "cleaned"
         item.updated_at = now
-        cleaned += 1
         # Auto-destroy must be traceable: who/what/when/why (harness #H-7).
         record_audit(
             session,
             actor="cron:cleanup",
             operation="vm.destroy",
-            resource=item.vm_id,
-            params={"deployment_item_id": item.id, "reason": "failed-vm-retention"},
+            resource=vm_id,
+            params={"deployment_item_id": item_id, "reason": "failed-vm-retention"},
             result="success",
         )
+        return True
 
-    if cleaned:
-        logger.info("cleanup cron destroyed %s failed VMs older than %sh", cleaned, retain_hours)
-    return cleaned
+
+async def _record_cleanup_failure(
+    sm: async_sessionmaker[AsyncSession], item_id: int, vm_id: str, exc: Exception
+) -> None:
+    """Own short txn: audit a destroy failure. The item stays ``failed`` so the
+    next sweep retries it."""
+    async with sm() as session, session.begin():
+        record_audit(
+            session,
+            actor="cron:cleanup",
+            operation="vm.destroy",
+            resource=vm_id,
+            params={
+                "deployment_item_id": item_id,
+                "reason": "failed-vm-retention",
+                "error": sanitize(str(exc)),
+            },
+            result="failure",
+        )
 
 
 async def cleanup_failed_vms(
@@ -109,11 +106,37 @@ async def cleanup_failed_vms(
     *,
     retain_hours: int = 24,
 ) -> int:
-    """One sweep over the DB. Returns the count of items just cleaned."""
-    async with sm() as session, session.begin():
-        return await _cleanup_in_session(
-            session, provisioner, retain_hours=retain_hours, now=_utcnow()
-        )
+    """One sweep over the DB. Returns the count of items just cleaned.
+
+    AC1 (#353): each VM is destroyed with **no DB transaction held**, and its
+    outcome is recorded in its own short transaction — so one slow vCenter
+    destroy never holds a write lock across the whole batch (the old single-txn
+    sweep pinned the connection for the cumulative duration of every destroy).
+    """
+    now = _utcnow()
+    eligible = await _select_cleanup_eligible(sm, retain_hours=retain_hours, now=now)
+
+    cleaned = 0
+    for item_id, vm_id in eligible:
+        try:
+            await provisioner.destroy_vm(vm_id)
+        except Exception as exc:
+            # Don't let one bad VM block the rest. Log + audit the failure +
+            # skip; next sweep picks it up again.
+            logger.exception(
+                "destroy_vm failed for deployment_item %s vm_id=%s; will retry next sweep",
+                item_id,
+                vm_id,
+            )
+            await _record_cleanup_failure(sm, item_id, vm_id, exc)
+            continue
+
+        if await _record_cleanup_success(sm, item_id, vm_id, now=now):
+            cleaned += 1
+
+    if cleaned:
+        logger.info("cleanup cron destroyed %s failed VMs older than %sh", cleaned, retain_hours)
+    return cleaned
 
 
 class FailedVmCleanupCron(PeriodicTask):

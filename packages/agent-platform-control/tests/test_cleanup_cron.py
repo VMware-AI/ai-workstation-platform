@@ -170,6 +170,31 @@ async def test_cleanup_continues_when_one_destroy_fails(seeded):
 
 
 @pytest.mark.asyncio
+async def test_cleanup_commits_each_item_independently(seeded):
+    """AC1 (#353): each destroy + mark-cleaned commits in its own transaction,
+    so a slow vCenter destroy never holds a write lock across the whole sweep.
+    Observed from a separate session during each destroy, the committed-cleaned
+    count grows mid-sweep — a single batch txn would show 0 until the very end.
+    """
+    seen_cleaned: list[int] = []
+
+    class ObservingProvisioner(FakeProvisioner):
+        async def destroy_vm(self, vm_id):
+            async with seeded() as s2:
+                rows = (await s2.execute(select(DeploymentItem))).scalars().all()
+                seen_cleaned.append(sum(1 for i in rows if i.state == "cleaned"))
+            await super().destroy_vm(vm_id)
+
+    fake = ObservingProvisioner()
+    total = await cleanup_failed_vms(seeded, fake, retain_hours=24)
+    assert total == 2
+    # First destroy: nothing committed-cleaned yet (0). By the last destroy the
+    # earlier item has already committed (>=1) — proof of per-item transactions.
+    assert seen_cleaned[0] == 0
+    assert seen_cleaned[-1] >= 1
+
+
+@pytest.mark.asyncio
 async def test_cron_class_sweep_once_works(seeded):
     """Smoke test the cron wrapper without firing up the background loop."""
     fake = FakeProvisioner()
