@@ -448,6 +448,50 @@ async def test_worker_without_store_skips_provisioning(seeded_batch):
 
 
 @pytest.mark.asyncio
+async def test_clone_runs_with_no_db_txn_held(seeded_batch):
+    """AC1 (#353): the up-to-600s clone must NOT run inside an open write
+    transaction. We prove the prepare phase committed and released before the
+    clone IO by reading the item from a *separate* session mid-clone — its
+    ``token_issued_at`` (stamped in the prepare phase) must already be visible.
+    If the prepare txn were still open across the clone, the stamp would be
+    uncommitted and invisible to the second connection.
+    """
+    sm = seeded_batch
+    observed: list[tuple[str, bool]] = []
+
+    class ObservingProvisioner(FakeProvisioner):
+        async def clone_vm(self, spec):
+            async with sm() as s2:
+                item = (
+                    await s2.execute(
+                        select(DeploymentItem).where(
+                            DeploymentItem.intended_name == spec.intended_name
+                        )
+                    )
+                ).scalar_one()
+                observed.append((item.state, item.token_issued_at is not None))
+            return await super().clone_vm(spec)
+
+    worker = DeploymentWorker(sm, ObservingProvisioner(), **WORKER_ARGS)
+    for _ in range(10):
+        if await worker.drain_once() == 0:
+            break
+
+    assert observed, "clone was never called"
+    assert all(state == "cloning" for state, _ in observed)
+    assert all(stamped for _, stamped in observed), (
+        "token_issued_at not visible mid-clone — prepare txn still held open "
+        "across the clone IO (AC1 regression)"
+    )
+
+    # Sanity: the batch still completes normally end-to-end.
+    async with sm() as s:
+        dep = await s.get(Deployment, "dep-1")
+        assert dep.state == "completed"
+        assert dep.succeeded_count == 3
+
+
+@pytest.mark.asyncio
 async def test_worker_secret_provision_failure_retries_then_fails(seeded_batch):
     """If secret provisioning raises after a successful clone, the item must
     not stay stuck in 'cloning' — it requeues and eventually lands 'failed'.

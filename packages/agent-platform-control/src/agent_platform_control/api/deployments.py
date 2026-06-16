@@ -31,7 +31,7 @@ from ..api.cloud_init import get_vm_secret_store
 from ..auth import CurrentUser, require_admin
 from ..config import get_settings
 from ..db.models import Deployment, DeploymentItem, ImageVersion, Tenant, User
-from ..db.session import get_session
+from ..db.session import get_session, get_sessionmaker
 from ..orchestrator.approval_redeploy import revoke_deployment_for_approval
 from ..orchestrator.audit import record_audit
 from ..orchestrator.deployment_state import recompute_deployment_state
@@ -358,6 +358,13 @@ async def create_from_approval(
         )
     template = spec.template
 
+    # Capture the approval fields we still need below into plain locals: the
+    # force path rolls back the request session (releasing its read lock before
+    # revoke), which expires the ORM ``approval`` and would otherwise trigger a
+    # lazy reload (MissingGreenlet) on later attribute access.
+    approval_requester = approval.requester
+    approval_package = approval.package
+
     if force:
         # 销毁用户 VM 不允许单次未确认 POST（#216，与 upgrades cutover/rollback
         # 的双重确认策略一致）：缺 body 或 confirm!=true 一律 409。
@@ -370,8 +377,13 @@ async def create_from_approval(
                 ),
             )
         provisioner = _provisioner_from_runtime(request)
+        # AC1 (#353): revoke owns its own short transactions and destroys VMs
+        # with no txn held. Release this request session's read lock first (the
+        # approval validation above is done with) so it can't contend with
+        # revoke's write commits on the same SQLite file.
+        await session.rollback()
         revoked = await revoke_deployment_for_approval(
-            session,
+            get_sessionmaker(),
             provisioner,
             request_id,
             secret_store=get_vm_secret_store(),
@@ -419,7 +431,7 @@ async def create_from_approval(
     await _validate_fk_targets_or_fail(
         session,
         tenant_id=settings.default_tenant_id,
-        owner_ids=[approval.requester],
+        owner_ids=[approval_requester],
     )
 
     dep_id = uuid.uuid4().hex
@@ -445,8 +457,8 @@ async def create_from_approval(
     session.add(
         DeploymentItem(
             deployment_id=dep_id,
-            owner_id=approval.requester,
-            intended_name=f"{approval.requester}-{approval.package}",
+            owner_id=approval_requester,
+            intended_name=f"{approval_requester}-{approval_package}",
             state="pending",
             attempts=0,
             user_token_enc=encrypt_user_token(user_token),

@@ -262,13 +262,41 @@ class DeploymentWorker(PeriodicTask):
             return row
 
     async def _process_item(self, item_id: int) -> None:
-        async with self._sm() as s:
+        # AC1 (#353): the clone is a slow (up-to-600s) vCenter round-trip. It
+        # must NOT run inside an open DB transaction — a held write txn blocks
+        # the whole SQLite file / pins a Postgres connection idle-in-transaction
+        # for the entire clone. So we split into three phases, each owning its
+        # own short transaction (or none): prepare → clone (no txn) → write-back.
+        spec = await self._prepare_clone(item_id)
+        if spec is None:
+            # Item/deployment vanished, or the fail-closed agent_user path
+            # already retired the item in the prepare transaction.
+            return
+
+        try:
+            result = await self._provisioner.clone_vm(spec)
+        except Exception as exc:
+            result = CloneResult(success=False, error=f"provisioner raised: {exc!r}")
+            logger.exception("provisioner crashed for item %s", item_id)
+
+        await self._write_back_result(item_id, result)
+
+    async def _prepare_clone(self, item_id: int) -> CloneSpec | None:
+        """Phase 1 (short txn): build the CloneSpec + stamp the TTL clock, then
+        commit so the connection is free during the slow clone IO.
+
+        Returns the spec to clone, or ``None`` when there is nothing to clone
+        (item/deployment gone, or a fail-closed agent_user mapping that retires
+        the item here via the normal failure path). The TTL-clock stamp (and any
+        fail-closed write) is committed on exit.
+        """
+        async with self._sm() as s, s.begin():
             item = await s.get(DeploymentItem, item_id)
             if item is None:
-                return
+                return None
             dep = await s.get(Deployment, item.deployment_id)
             if dep is None:
-                return
+                return None
             owner_login = item.owner_id
 
             # Decision 1B: derive the in-VM linux account from the owner id.
@@ -282,8 +310,7 @@ class DeploymentWorker(PeriodicTask):
             except AgentUserError as exc:
                 logger.warning("item %s owner %r: %s", item_id, item.owner_id, exc)
                 await self._apply_result(s, item, dep, CloneResult(success=False, error=str(exc)))
-                await s.commit()
-                return
+                return None
 
             spec = CloneSpec(
                 intended_name=item.intended_name,
@@ -303,16 +330,26 @@ class DeploymentWorker(PeriodicTask):
             )
 
             # Decision 8: stamp the TTL clock just before handing extraConfig to
-            # vCenter. We accept the few-millisecond delta vs the exact moment
-            # CloneVM_Task receives it — both are within the same session and
-            # the 30-minute budget is generous.
+            # vCenter. Committed here (phase 1) so the clock is persisted before
+            # the token leaves for the guest — the few-ms delta vs the exact
+            # CloneVM_Task moment is well inside the 30-minute budget.
             item.token_issued_at = _utcnow()
+            return spec
 
-            try:
-                result = await self._provisioner.clone_vm(spec)
-            except Exception as exc:
-                result = CloneResult(success=False, error=f"provisioner raised: {exc!r}")
-                logger.exception("provisioner crashed for item %s", item_id)
+    async def _write_back_result(self, item_id: int, result: CloneResult) -> None:
+        """Phase 3 (fresh txn): persist the clone outcome + provision secrets.
+
+        Runs in a new transaction opened *after* the clone IO completed — the
+        item is still ours (claimed ``cloning``; another worker only claims
+        ``pending``), so we re-read it here and write the result.
+        """
+        async with self._sm() as s:
+            item = await s.get(DeploymentItem, item_id)
+            if item is None:
+                return
+            dep = await s.get(Deployment, item.deployment_id)
+            if dep is None:
+                return
 
             await self._apply_result(s, item, dep, result)
 

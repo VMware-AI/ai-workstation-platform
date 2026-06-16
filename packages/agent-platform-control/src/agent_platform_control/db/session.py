@@ -45,6 +45,15 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """Return the process sessionmaker for callers that must own their own
+    short transactions (e.g. work that releases the request txn before slow IO).
+    """
+    get_engine()
+    assert _sessionmaker is not None  # nosec B101 — import-time invariant, not user input
+    return _sessionmaker
+
+
 def reset_for_tests() -> None:
     """Tests call this to force a fresh engine per test session."""
     global _engine, _sessionmaker
