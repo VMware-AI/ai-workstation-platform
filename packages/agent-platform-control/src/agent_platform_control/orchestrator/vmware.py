@@ -39,7 +39,7 @@ from urllib.parse import urlparse
 
 from agent_platform_telemetry_shim import CircuitBreaker
 from pyVim import connect as vim_connect
-from pyVmomi import vim
+from pyVmomi import vim, vmodl
 
 from .audit import sanitize
 from .protocol import CloneResult, CloneSpec, Provisioner
@@ -215,15 +215,67 @@ def get_si_verify_ssl(si: object) -> bool:
 PLATFORM_MANAGED_KEY = "guestinfo.agent_platform.managed"
 
 
-def _is_platform_managed(vm) -> bool:
-    """True if ``vm`` carries the Agent Platform extraConfig marker."""
+def _extra_config_has_managed_marker(extra_config) -> bool:
+    """True if an extraConfig option list carries the Agent Platform marker."""
     try:
-        for opt in vm.config.extraConfig or []:
+        for opt in extra_config or []:
             if opt.key == PLATFORM_MANAGED_KEY and str(opt.value) == "1":
                 return True
     except Exception:
         return False
     return False
+
+
+def _is_platform_managed(vm) -> bool:
+    """True if ``vm`` carries the Agent Platform extraConfig marker."""
+    try:
+        return _extra_config_has_managed_marker(vm.config.extraConfig)
+    except Exception:
+        return False
+
+
+def _retrieve_vm_props(content, paths: list[str]) -> list[tuple]:
+    """Fetch ``paths`` for every VM in inventory via PropertyCollector,
+    returning ``[(vm_moref, {path: value}), ...]``.
+
+    Replaces the old per-VM lazy property access (one vCenter RPC *per VM per
+    attribute*) with ``RetrievePropertiesEx`` + ``ContinueRetrieve`` paging.
+    The ``Ex`` variant is paged on purpose: vCenter caps a single response at
+    ``maxObjectsRetrievalLimit`` and hands back a continuation ``token``, so we
+    loop until the token is exhausted — otherwise a large inventory would be
+    silently truncated and an existing managed VM could be missed (letting the
+    clone idempotency check fall through to a duplicate clone). Kept as a thin
+    pyVmomi seam so the matching logic above stays unit-testable; the SDK wiring
+    itself is exercised by the vcsim integration test.
+    """
+    pc = content.propertyCollector
+    view = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
+    try:
+        traversal = vmodl.query.PropertyCollector.TraversalSpec(
+            name="traverseView", type=vim.view.ContainerView, path="view", skip=False
+        )
+        obj_spec = vmodl.query.PropertyCollector.ObjectSpec(
+            obj=view, skip=True, selectSet=[traversal]
+        )
+        prop_spec = vmodl.query.PropertyCollector.PropertySpec(
+            type=vim.VirtualMachine, pathSet=list(paths), all=False
+        )
+        filter_spec = vmodl.query.PropertyCollector.FilterSpec(
+            objectSet=[obj_spec], propSet=[prop_spec]
+        )
+        options = vmodl.query.PropertyCollector.RetrieveOptions()
+        out: list[tuple] = []
+        result = pc.RetrievePropertiesEx([filter_spec], options)
+        while result is not None:
+            for oc in result.objects or []:
+                out.append((oc.obj, {p.name: p.val for p in (oc.propSet or [])}))
+            token = result.token
+            if not token:
+                break
+            result = pc.ContinueRetrieve(token)
+        return out
+    finally:
+        view.Destroy()
 
 
 def _find_vm_by_name(content, name: str):
@@ -235,15 +287,22 @@ def _find_vm_by_name(content, name: str):
     would later let destroy_vm delete a VM we never created (PR-review #103).
     A genuine collision instead falls through to the clone, which surfaces
     vCenter's DuplicateName error honestly.
+
+    Pulls ``name`` + ``config.extraConfig`` for the whole inventory in one
+    PropertyCollector call rather than touching each candidate VM individually.
     """
-    view = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
-    try:
-        for candidate in view.view:
-            if candidate.name == name and _is_platform_managed(candidate):
-                return candidate
-    finally:
-        view.Destroy()
+    for vm, props in _retrieve_vm_props(content, ["name", "config.extraConfig"]):
+        if props.get("name") == name and _extra_config_has_managed_marker(
+            props.get("config.extraConfig")
+        ):
+            return vm
     return None
+
+
+def _vm_ref(si, vm_id: str):
+    """Build a VirtualMachine managed-object reference straight from its MoRef
+    id — an O(1) handle, no inventory scan. Thin pyVmomi seam (vcsim-covered)."""
+    return vim.VirtualMachine(vm_id, si._stub)
 
 
 def _find_template(si, template_path: str):
@@ -520,33 +579,35 @@ class VmwareProvisioner(Provisioner):
         a missing VM already satisfies.
         """
         si = _connect(self._target)
-        content = si.RetrieveContent()
-        # MoRef → ManagedObject by-id lookup. vSphere SDK exposes this via
-        # the search index; missing VMs return None.
-        view = content.viewManager.CreateContainerView(
-            content.rootFolder, [vim.VirtualMachine], True
-        )
-        target = None
+        # MoRef → ManagedObject directly; no full-inventory ContainerView scan.
+        # A VM that no longer exists raises ManagedObjectNotFound on first
+        # property access, which already satisfies the post-condition.
+        target = _vm_ref(si, vm_id)
         try:
-            for candidate in view.view:
-                if str(candidate._moId) == vm_id:
-                    target = candidate
-                    break
-        finally:
-            view.Destroy()
-
-        if target is None:
+            power_state = target.runtime.powerState
+        except vmodl.fault.ManagedObjectNotFound:
             logger.info("destroy_vm: VM %s already gone, treating as success", vm_id)
             return
 
         # Power-off first if running — DestroyVM on a powered-on VM raises.
         # Idempotent: PoweredOff stays PoweredOff.
         try:
-            if target.runtime.powerState == vim.VirtualMachinePowerState.poweredOn:
+            if power_state == vim.VirtualMachinePowerState.poweredOn:
                 _wait_sync(target.PowerOffVM_Task(), timeout_s=self._clone_timeout_s)
         except vim.fault.InvalidPowerState:
             # Already in the requested state; safe to continue.
             pass
+        except vmodl.fault.ManagedObjectNotFound:
+            # Raced with another reaper / manual delete between the powerState
+            # read and power-off — VM is already absent, post-condition met.
+            logger.info("destroy_vm: VM %s vanished during power-off, treating as success", vm_id)
+            return
 
-        _wait_sync(target.Destroy_Task(), timeout_s=self._clone_timeout_s)
+        try:
+            _wait_sync(target.Destroy_Task(), timeout_s=self._clone_timeout_s)
+        except vmodl.fault.ManagedObjectNotFound:
+            # Raced with another reaper / manual delete between power-off and
+            # destroy — still success (absent from inventory).
+            logger.info("destroy_vm: VM %s vanished during destroy, treating as success", vm_id)
+            return
         logger.info("destroy_vm: %s destroyed", vm_id)

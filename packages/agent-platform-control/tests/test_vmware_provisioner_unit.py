@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from agent_platform_control.orchestrator.protocol import CloneSpec
@@ -24,6 +25,7 @@ from agent_platform_control.orchestrator.vmware import (
     _render_userdata,
     _validate_ttyd_allow_cidr,
 )
+from pyVmomi import vim, vmodl
 
 CLOUD_INIT_TPL = (
     Path(__file__).resolve().parents[2]
@@ -200,31 +202,11 @@ class _VM:
         self.config = _cfg
 
 
-class _View:
-    def __init__(self, vms):
-        self.view = vms
-
-    def Destroy(self):
-        pass
-
-
-class _Content:
-    def __init__(self, vms):
-        self.rootFolder = object()
-        self._vms = vms
-
-    class _vm_class:
-        pass
-
-    @property
-    def viewManager(self):
-        outer = self
-
-        class _VM_Manager:
-            def CreateContainerView(self, _root, _types, _recursive):
-                return _View(outer._vms)
-
-        return _VM_Manager()
+def _props_for(vms):
+    """Mimic ``_retrieve_vm_props(content, ["name","config.extraConfig"])``:
+    one (vm, props) tuple per VM, properties already materialized (the whole
+    point of the PropertyCollector path — no per-VM lazy fetch)."""
+    return [(vm, {"name": vm.name, "config.extraConfig": vm.config.extraConfig}) for vm in vms]
 
 
 def test_build_extra_config_stamps_platform_marker():
@@ -232,17 +214,156 @@ def test_build_extra_config_stamps_platform_marker():
     assert any(o.key == PLATFORM_MANAGED_KEY and o.value == "1" for o in opts)
 
 
-def test_find_vm_by_name_ignores_unmanaged_namesake():
+def test_find_vm_by_name_ignores_unmanaged_namesake(monkeypatch):
     """An unrelated VM sharing the name must NOT be adopted (PR-review #103)."""
-    content = _Content([_VM("vm-x", managed=False)])
-    assert _find_vm_by_name(content, "vm-x") is None
+    from agent_platform_control.orchestrator import vmware as vmware_mod
+
+    vms = [_VM("vm-x", managed=False)]
+    monkeypatch.setattr(vmware_mod, "_retrieve_vm_props", lambda _c, _p: _props_for(vms))
+    assert _find_vm_by_name(object(), "vm-x") is None
     assert not _is_platform_managed(_VM("vm-x", managed=False))
 
 
-def test_find_vm_by_name_adopts_managed_match():
-    content = _Content([_VM("vm-x", managed=True)])
-    found = _find_vm_by_name(content, "vm-x")
+def test_find_vm_by_name_adopts_managed_match(monkeypatch):
+    from agent_platform_control.orchestrator import vmware as vmware_mod
+
+    vms = [_VM("vm-x", managed=True)]
+    monkeypatch.setattr(vmware_mod, "_retrieve_vm_props", lambda _c, _p: _props_for(vms))
+    found = _find_vm_by_name(object(), "vm-x")
     assert found is not None and found.name == "vm-x"
+
+
+def test_find_vm_by_name_single_bulk_fetch_not_per_vm(monkeypatch):
+    """Idempotency check must issue exactly one bulk property fetch regardless
+    of inventory size — guards the O(N) per-VM RPC regression (#353 AC3)."""
+    from agent_platform_control.orchestrator import vmware as vmware_mod
+
+    vms = [_VM(f"vm-{i}", managed=False) for i in range(50)] + [_VM("target", managed=True)]
+    calls = {"n": 0}
+
+    def _spy(_content, _paths):
+        calls["n"] += 1
+        return _props_for(vms)
+
+    monkeypatch.setattr(vmware_mod, "_retrieve_vm_props", _spy)
+    found = _find_vm_by_name(object(), "target")
+    assert found is not None and found.name == "target"
+    assert calls["n"] == 1, f"expected 1 bulk fetch, got {calls['n']}"
+
+
+# ---------------------------------------------------------- destroy: moRef-direct
+
+
+class _FakeStub:
+    pass
+
+
+class _FakeSIWithStub:
+    _stub = _FakeStub()
+
+
+class _FakeTarget:
+    """Stands in for the VirtualMachine ref _vm_ref builds from a MoRef id."""
+
+    def __init__(
+        self,
+        *,
+        power_state,
+        missing=False,
+        vanish_on_destroy=False,
+        vanish_on_poweroff=False,
+    ):
+        self._power_state = power_state
+        self._missing = missing
+        self._vanish_on_destroy = vanish_on_destroy
+        self._vanish_on_poweroff = vanish_on_poweroff
+        self.powered_off = False
+        self.destroyed = False
+
+    @property
+    def runtime(self):
+        if self._missing:
+            raise vmodl.fault.ManagedObjectNotFound()
+        return SimpleNamespace(powerState=self._power_state)
+
+    def PowerOffVM_Task(self):
+        if self._vanish_on_poweroff:
+            raise vmodl.fault.ManagedObjectNotFound()
+        self.powered_off = True
+        return "power-off-task"
+
+    def Destroy_Task(self):
+        if self._vanish_on_destroy:
+            raise vmodl.fault.ManagedObjectNotFound()
+        self.destroyed = True
+        return "destroy-task"
+
+
+def _wire_destroy(monkeypatch, target):
+    """Point _destroy_sync at a fake SI + fake target, no-op the task waiter."""
+    from agent_platform_control.orchestrator import vmware as vmware_mod
+
+    monkeypatch.setattr(vmware_mod, "_connect", lambda _t: _FakeSIWithStub())
+    monkeypatch.setattr(vmware_mod, "_vm_ref", lambda _si, _vm_id: target)
+    monkeypatch.setattr(vmware_mod, "_wait_sync", lambda task, timeout_s=None: None)
+    return vmware_mod
+
+
+def _provisioner(tmp_path):
+    tpl = tmp_path / "u.yaml"
+    tpl.write_text("#cloud-config")
+    return VmwareProvisioner(
+        vcenter_url="https://vc.example/sdk",
+        vcenter_user="u",
+        vcenter_password="p",
+        cloud_init_template_path=tpl,
+    )
+
+
+def test_destroy_sync_powers_off_running_then_destroys(tmp_path, monkeypatch):
+    target = _FakeTarget(power_state=vim.VirtualMachinePowerState.poweredOn)
+    _wire_destroy(monkeypatch, target)
+    _provisioner(tmp_path)._destroy_sync("vm-123")
+    assert target.powered_off is True
+    assert target.destroyed is True
+
+
+def test_destroy_sync_skips_power_off_when_already_off(tmp_path, monkeypatch):
+    target = _FakeTarget(power_state=vim.VirtualMachinePowerState.poweredOff)
+    _wire_destroy(monkeypatch, target)
+    _provisioner(tmp_path)._destroy_sync("vm-123")
+    assert target.powered_off is False
+    assert target.destroyed is True
+
+
+def test_destroy_sync_missing_vm_is_idempotent_success(tmp_path, monkeypatch):
+    """A VM already gone raises ManagedObjectNotFound on first access — treated
+    as success, no destroy attempted (post-condition already met)."""
+    target = _FakeTarget(power_state=vim.VirtualMachinePowerState.poweredOff, missing=True)
+    _wire_destroy(monkeypatch, target)
+    _provisioner(tmp_path)._destroy_sync("vm-gone")  # must not raise
+    assert target.destroyed is False
+
+
+def test_destroy_sync_vanish_during_destroy_is_success(tmp_path, monkeypatch):
+    """Racing reaper deletes the VM between power-off and destroy — still OK."""
+    target = _FakeTarget(power_state=vim.VirtualMachinePowerState.poweredOn, vanish_on_destroy=True)
+    _wire_destroy(monkeypatch, target)
+    _provisioner(tmp_path)._destroy_sync("vm-racing")  # must not raise
+    assert target.powered_off is True
+    assert target.destroyed is False
+
+
+def test_destroy_sync_vanish_during_power_off_is_success(tmp_path, monkeypatch):
+    """Racing reaper deletes the VM between the powerState read and power-off —
+    still success (post-condition 'absent from inventory' already met)."""
+    target = _FakeTarget(
+        power_state=vim.VirtualMachinePowerState.poweredOn, vanish_on_poweroff=True
+    )
+    _wire_destroy(monkeypatch, target)
+    _provisioner(tmp_path)._destroy_sync("vm-racing-poweroff")  # must not raise
+    assert target.powered_off is False
+    assert target.destroyed is False
 
 
 @pytest.mark.asyncio
