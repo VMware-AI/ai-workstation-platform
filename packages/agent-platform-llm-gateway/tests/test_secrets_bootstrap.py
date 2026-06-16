@@ -39,7 +39,8 @@ def _config(master_key: str = "sk-very-real-secret-token-xxxxxxxxxxxxxxxxxxxx") 
             "master_key": master_key,
             "database_url": "postgresql://agent-platform@localhost/agent_platform_gateway",
         },
-        "litellm_settings": {"rpm": 100, "tpm": 50_000},
+        # rpm/tpm under litellm_settings are silently ignored by LiteLLM (#351).
+        "litellm_settings": {"success_callback": ["postgres"]},
     }
 
 

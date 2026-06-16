@@ -11,9 +11,14 @@ Platform invariants (over and above what LiteLLM enforces):
 * ``general_settings.master_key`` is set and not the placeholder
 * ``general_settings.database_url`` is set (spend tracking goes to
   the shared Postgres alongside C1)
-* per-user ``rpm`` / ``tpm`` limits are configured under
-  ``litellm_settings`` so Task 1.5.6 acceptance ("超额 log warning")
-  cannot be defeated by simply not setting limits
+* the config does NOT carry keys LiteLLM silently ignores (issue #351):
+  ``litellm_settings.rpm`` / ``.tpm`` and ``anthropic_passthrough_endpoint``.
+  These were assumed to enforce per-user limits / Anthropic routing but are
+  not consumed by LiteLLM at all — leaving them in gives false security. Real
+  per-user limits are ``rpm_limit`` / ``tpm_limit`` on the virtual key (set at
+  generation via C1's ``/key/generate``); the Anthropic ``/v1/messages`` route
+  is built into LiteLLM natively (no config key). We reject the dead keys so a
+  failed assumption surfaces at validate-time instead of silently at runtime.
 """
 
 from __future__ import annotations
@@ -79,22 +84,49 @@ def validate_config(config: Mapping[str, Any]) -> None:
         )
 
     settings = config.get("litellm_settings")
-    if not isinstance(settings, Mapping):
-        raise GatewayConfigError("litellm_settings section is required")
-    if not isinstance(settings.get("rpm"), int) or settings["rpm"] <= 0:
-        raise GatewayConfigError(
-            "litellm_settings.rpm must be a positive integer (Task 1.5.6 — "
-            "rate-limit logging requires rpm to be set)"
-        )
-    if not isinstance(settings.get("tpm"), int) or settings["tpm"] <= 0:
-        raise GatewayConfigError(
-            "litellm_settings.tpm must be a positive integer (Task 1.5.6 — "
-            "rate-limit logging requires tpm to be set)"
-        )
+    if settings is not None and not isinstance(settings, Mapping):
+        raise GatewayConfigError("litellm_settings must be a mapping when present")
 
-    logger.info(
-        "gateway config OK: %d model(s), rpm=%s, tpm=%s",
-        len(model_list),
-        settings["rpm"],
-        settings["tpm"],
-    )
+    _reject_silently_ignored_keys(config, settings)
+
+    logger.info("gateway config OK: %d model(s)", len(model_list))
+
+
+# Anthropic routing is native in LiteLLM — no config key gates it (issue #351).
+_ANTHROPIC_PASSTHROUGH_MSG = (
+    "anthropic_passthrough_endpoint is not a LiteLLM config key — it is silently "
+    "ignored. The Anthropic /v1/messages route (and the /anthropic/* pass-through) "
+    "is built into the LiteLLM proxy natively via plain model_list mappings; remove "
+    "this key. Point Claude Code at the proxy with ANTHROPIC_BASE_URL=<proxy>."
+)
+
+_RPM_TPM_MSG = (
+    "rpm / tpm are NOT consumed by LiteLLM as global/proxy rate limits (silently "
+    "ignored) — they do not rate-limit anything and give false security (issue "
+    "#351). Per-user limits are rpm_limit / tpm_limit on the virtual key, set at "
+    "generation time via C1's /key/generate (or team-level limits via /team/new). "
+    "Remove rpm/tpm from {where}. (Model-level rpm/tpm under a model_list entry's "
+    "litellm_params is a different, valid key and is not rejected.)"
+)
+
+
+def _reject_silently_ignored_keys(
+    config: Mapping[str, Any], settings: Mapping[str, Any] | None
+) -> None:
+    """Fail fast on config keys LiteLLM accepts-and-ignores (issue #351), so a
+    wrong assumption surfaces here instead of as silent runtime behaviour.
+
+    rpm/tpm and anthropic_passthrough_endpoint are both checked at the top level
+    *and* under litellm_settings — an operator migrating from another example may
+    drop a dead key in either spot, and every form of the wrong assumption must
+    surface loudly, not just the nested one.
+    """
+    if "rpm" in config or "tpm" in config:
+        raise GatewayConfigError(_RPM_TPM_MSG.format(where="the config root"))
+    if "anthropic_passthrough_endpoint" in config:
+        raise GatewayConfigError(_ANTHROPIC_PASSTHROUGH_MSG)
+    if isinstance(settings, Mapping):
+        if "rpm" in settings or "tpm" in settings:
+            raise GatewayConfigError(_RPM_TPM_MSG.format(where="litellm_settings"))
+        if "anthropic_passthrough_endpoint" in settings:
+            raise GatewayConfigError(_ANTHROPIC_PASSTHROUGH_MSG)

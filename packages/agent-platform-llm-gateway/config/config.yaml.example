@@ -73,15 +73,18 @@ litellm_settings:
   #   C1_INGEST_TOKEN  共享服务 token（与 C1 settings.c1_ingest_service_token 一致）
   callbacks: ["agent_platform_llm_gateway.callbacks.UsageCallback"]
 
-  # === Anthropic 协议透传（给 Claude Code）===
-  # /anthropic/v1/messages 自动转 OpenAI 协议调后端
-  anthropic_passthrough_endpoint:
-    enabled: true
-    target_endpoint: /v1/chat/completions
+  # === Anthropic 协议（给 Claude Code）===
+  # 不需要任何配置键：LiteLLM proxy 原生暴露 Anthropic /v1/messages，并提供
+  # /anthropic/* pass-through，二者都走下面的 model_list 映射。Claude Code 直接
+  # 指 ANTHROPIC_BASE_URL=<proxy>（统一端点）或 <proxy>/anthropic（pass-through）。
+  # （曾经的 anthropic_passthrough_endpoint 不是 LiteLLM 配置键，会被静默忽略——
+  #  validator 现在直接拒绝它，见 issue #351。）
 
-  # === 限速 v1 (M1: 只记录) ===
-  rpm: 100    # 每用户每分钟 100 请求
-  tpm: 50000  # 每用户每分钟 50K token (in+out)
+  # === 限速 ===
+  # 注意：litellm_settings.rpm / .tpm 不被 LiteLLM 消费（静默忽略，不限任何流，
+  # 详见 issue #351 + https://docs.litellm.ai/docs/proxy/config_settings）。
+  # 每用户限速是 virtual key 上的 rpm_limit / tpm_limit，由 C1 /key/generate 在
+  # 发 key 时挂载（团队级则用 /team/new）。所以这里不再写 rpm/tpm。
 
 # === Virtual Keys (per-user API key 体系) ===
 # 真实 key 由 agent-platform-control 通过 /key/generate 动态发；本文件仅写一个"评测 master"
@@ -94,6 +97,8 @@ litellm_settings:
 #     models: [qwen-coder-32b, claude-3-5-sonnet-20240620]
 #     max_budget: 100.0
 #     budget_duration: 30d
+#     rpm_limit: 100                # 每分钟请求数——LiteLLM 真正消费的 key 级限速
+#     tpm_limit: 50000              # 每分钟 token（in+out）
 #     # Task 1.5.3: 这三个字段会落到 LiteLLM kwargs.litellm_params.metadata，
 #     # UsageCallback 据此把 token_usage 行的 user_id/tenant_id/agent 写对。
 #     metadata:
