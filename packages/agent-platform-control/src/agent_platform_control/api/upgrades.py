@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import CurrentUser, require_admin
@@ -259,8 +260,15 @@ async def start_upgrade(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"tenant_id {body.tenant_id!r} is not a known tenant",
         )
-    for owner_id in dict.fromkeys(vm.owner_id for vm in body.vms):
-        if await session.get(User, owner_id) is None:
+    owner_ids = list(dict.fromkeys(vm.owner_id for vm in body.vms))
+    if not owner_ids:  # guard an empty IN (...) — parity with deployments.py
+        return
+    # One IN (...) lookup instead of one get(User) per owner (no N+1).
+    known_owners = set(
+        (await session.execute(select(User.id).where(User.id.in_(owner_ids)))).scalars().all()
+    )
+    for owner_id in owner_ids:  # report the first unknown, in request order
+        if owner_id not in known_owners:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"owner_id {owner_id!r} is not a known user",
