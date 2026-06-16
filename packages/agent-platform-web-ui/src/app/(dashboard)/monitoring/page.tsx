@@ -1,10 +1,11 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { RefreshCw } from "lucide-react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { EChart } from "@/components/ui/echart";
+import { buildTimeSeriesLineOption } from "@/lib/charts/lineOption";
 import { fetchJson } from "@/lib/fetchJson";
 
 interface Instance { id: string; name: string }
@@ -37,11 +38,30 @@ export default function MonitoringPage() {
 
   useEffect(() => { loadMetrics(); }, [selectedId]);
 
-  const chartData = historical.map(m => ({
-    time: new Date(m.timestamp).toLocaleTimeString(),
-    CPU: m.cpuPercent,
-    内存: m.memoryMb,
-  }));
+  const times = useMemo(
+    () => historical.map(m => new Date(m.timestamp).toLocaleTimeString()),
+    [historical]
+  );
+  const cpuOption = useMemo(
+    () => buildTimeSeriesLineOption({
+      categories: times,
+      name: "CPU",
+      values: historical.map(m => m.cpuPercent),
+      color: "#3b82f6",
+      unit: "%",
+    }),
+    [times, historical]
+  );
+  const memOption = useMemo(
+    () => buildTimeSeriesLineOption({
+      categories: times,
+      name: "内存",
+      values: historical.map(m => m.memoryMb),
+      color: "#8b5cf6",
+      unit: " MB",
+    }),
+    [times, historical]
+  );
 
   return (
     <div>
@@ -81,34 +101,18 @@ export default function MonitoringPage() {
         </div>
       )}
 
-      {chartData.length > 0 ? (
+      {historical.length > 0 ? (
         <div className="grid gap-4">
           <Card>
             <CardHeader><CardTitle className="text-sm">CPU 历史趋势</CardTitle></CardHeader>
             <CardContent>
-              <ResponsiveContainer width="100%" height={200}>
-                <LineChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                  <XAxis dataKey="time" tick={{ fontSize: 11 }} />
-                  <YAxis tick={{ fontSize: 11 }} unit="%" />
-                  <Tooltip />
-                  <Line type="monotone" dataKey="CPU" stroke="#3b82f6" dot={false} strokeWidth={2} />
-                </LineChart>
-              </ResponsiveContainer>
+              <EChart height={200} option={cpuOption} />
             </CardContent>
           </Card>
           <Card>
             <CardHeader><CardTitle className="text-sm">内存历史趋势</CardTitle></CardHeader>
             <CardContent>
-              <ResponsiveContainer width="100%" height={200}>
-                <LineChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                  <XAxis dataKey="time" tick={{ fontSize: 11 }} />
-                  <YAxis tick={{ fontSize: 11 }} unit=" MB" />
-                  <Tooltip />
-                  <Line type="monotone" dataKey="内存" stroke="#8b5cf6" dot={false} strokeWidth={2} />
-                </LineChart>
-              </ResponsiveContainer>
+              <EChart height={200} option={memOption} />
             </CardContent>
           </Card>
         </div>
