@@ -168,6 +168,77 @@ async def test_batch_check_counts_duplicate_owners(sm):
     assert exc_info.value.extra_requested == 4
 
 
+# ---------------------------------------------------------- batch is O(1) queries
+
+
+def _count_selects(engine):
+    """Attach a SELECT counter to the async engine's sync core. Returns a
+    one-element list whose [0] is incremented per executed SELECT."""
+    from sqlalchemy import event
+
+    box = [0]
+
+    def _on_exec(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            box[0] += 1
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _on_exec)
+    return box
+
+
+async def _seed_many_owners(sm, n: int, *, tenant_quota: int | None = None) -> list[str]:
+    owners = [f"u{i}" for i in range(n)]
+    async with sm() as s:
+        s.add(Tenant(id="t-a", display_name="A", quota_vms_per_user=tenant_quota))
+        for oid in owners:
+            s.add(User(id=oid, email=f"{oid}@x", display_name=oid, tenant_id="t-a"))
+        await s.commit()
+    return owners
+
+
+@pytest.mark.asyncio
+async def test_batch_quota_query_count_is_bounded(engine, sm):
+    """The whole point of the batch path: query count must NOT scale with the
+    number of owners. 50 distinct owners must cost the same handful of SELECTs
+    as 2 owners (no N+1)."""
+    owners = await _seed_many_owners(sm, 50)
+    box = _count_selects(engine)
+    async with sm() as s:
+        await check_batch_quota(s, owner_ids=owners)
+    assert box[0] <= 4, f"batch quota issued {box[0]} SELECTs for 50 owners (N+1 regression)"
+
+
+@pytest.mark.asyncio
+async def test_batch_quota_mixed_overrides_and_counts(sm):
+    """Correctness across the 3-layer fallback in a single batch: a user
+    override, a tenant override, and the global default, each with distinct
+    active VM counts, must all be resolved correctly."""
+    async with sm() as s:
+        s.add(Tenant(id="t-a", display_name="A", quota_vms_per_user=5))  # tenant default 5
+        s.add(User(id="ovr", email="o@x", display_name="O", tenant_id="t-a", quota_vms=2))
+        s.add(User(id="ten", email="t@x", display_name="T", tenant_id="t-a"))  # inherits 5
+        s.add(Tenant(id="t-b", display_name="B"))  # no tenant override
+        s.add(User(id="def", email="d@x", display_name="D", tenant_id="t-b"))  # global 3
+        await s.commit()
+    # ovr: limit 2, has 1 active → +1 OK
+    await _add_active_vms(sm, "ovr", 1)
+    # ten: limit 5, has 4 active → +1 OK
+    await _add_active_vms(sm, "ten", 4)
+
+    async with sm() as s:
+        # all within limits
+        await check_batch_quota(s, owner_ids=["ovr", "ten", "def"])
+
+    # Now push 'ovr' over: limit 2, has 1, request 2 more → 3 > 2 fails on ovr.
+    async with sm() as s:
+        with pytest.raises(QuotaExceededError) as exc:
+            await check_batch_quota(s, owner_ids=["ovr", "ovr", "ten", "def"])
+    assert exc.value.owner_id == "ovr"
+    assert exc.value.limit == 2
+    assert exc.value.current == 1
+    assert exc.value.extra_requested == 2
+
+
 # ---------------------------------------------------------- HTTP wire (429)
 
 

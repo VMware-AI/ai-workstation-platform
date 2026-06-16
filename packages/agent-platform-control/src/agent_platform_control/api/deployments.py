@@ -69,8 +69,17 @@ async def _validate_fk_targets_or_fail(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"tenant_id {tenant_id!r} is not a known tenant",
         )
-    for owner_id in dict.fromkeys(owner_ids):  # de-dup, preserve order
-        if await session.get(User, owner_id) is None:
+    unique_owner_ids = list(dict.fromkeys(owner_ids))  # de-dup, preserve order
+    if not unique_owner_ids:
+        return
+    # One IN (...) lookup instead of one get(User) per owner (no N+1).
+    known = set(
+        (await session.execute(select(User.id).where(User.id.in_(unique_owner_ids))))
+        .scalars()
+        .all()
+    )
+    for owner_id in unique_owner_ids:  # report the first unknown, in request order
+        if owner_id not in known:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"owner_id {owner_id!r} is not a known user",
