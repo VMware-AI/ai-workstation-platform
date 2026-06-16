@@ -78,11 +78,33 @@ export async function countProvisionWorkers(timeoutMs = 2000): Promise<number | 
   }
 }
 
+// Worker concurrency (#257 M22). The old hardcoded 5 starved at 6 simultaneous
+// provisions: each job holds a slot up to ~5 min inside `waitForIp`
+// (`govc vm.ip -wait`). Configurable via PROVISION_CONCURRENCY so ops can tune
+// to their vCenter, with the default raised to 10 so the common "6 concurrent"
+// case no longer starves. The deeper fix — drop the synchronous IP wait and let
+// the /api/nodes/register callback drive RUNNING — is tracked in #257 and needs
+// the bootstrap/register path made mandatory + P2-e real-VM validation first.
+export const DEFAULT_PROVISION_CONCURRENCY = 10;
+// Each slot can hold a ~5 min synchronous `govc vm.ip -wait` against vCenter,
+// so an over-large value floods vCenter with concurrent calls. Clamp a
+// fat-fingered PROVISION_CONCURRENCY (e.g. 500) to a sane ceiling rather than
+// accepting it silently. Raise this only alongside the #257 async-register fix.
+export const MAX_PROVISION_CONCURRENCY = 50;
+
+export function resolveProvisionConcurrency(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = Number(env.PROVISION_CONCURRENCY);
+  if (!Number.isInteger(raw) || raw <= 0) return DEFAULT_PROVISION_CONCURRENCY;
+  return Math.min(raw, MAX_PROVISION_CONCURRENCY);
+}
+
 export function createWorker(
   processor: (job: Job<ProvisionJobData>) => Promise<void>
 ): Worker<ProvisionJobData> {
   return new Worker<ProvisionJobData>(PROVISION_QUEUE, processor, {
     connection,
-    concurrency: 5,
+    concurrency: resolveProvisionConcurrency(),
   });
 }
