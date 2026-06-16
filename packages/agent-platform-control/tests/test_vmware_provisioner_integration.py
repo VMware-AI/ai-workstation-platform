@@ -85,3 +85,25 @@ async def test_clone_unknown_template_returns_failure(provisioner):
     assert result.success is False
     assert result.error is not None
     assert "not found" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_destroy_by_moref_then_idempotent(provisioner):
+    """Real-SDK coverage for AC3: destroy resolves the VM straight from its
+    MoRef (no inventory scan), and a second destroy of the now-gone id is a
+    no-op success (ManagedObjectNotFound treated as 'already absent')."""
+    clone = await provisioner.clone_vm(_spec("agent-platform-test-destroy-1"))
+    assert clone.success, clone.error
+    assert clone.vm_id is not None
+
+    # First destroy: VM exists → powered off + destroyed via moRef-direct.
+    await provisioner.destroy_vm(clone.vm_id)
+
+    # Second destroy of the same (now missing) moRef must not raise.
+    await provisioner.destroy_vm(clone.vm_id)
+
+    # The name is free again — a fresh clone succeeds (the destroyed VM is no
+    # longer matched by the idempotency check).
+    again = await provisioner.clone_vm(_spec("agent-platform-test-destroy-1"))
+    assert again.success, again.error
+    assert again.vm_id is not None
