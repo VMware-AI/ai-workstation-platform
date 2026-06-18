@@ -13,7 +13,7 @@ dev = [
 
 [project.optional-dependencies]
 eval = [
-    "openai>=1.0",
+    "openai>=2.41.1",
     "pyyaml>=6.0",
 ]
 
